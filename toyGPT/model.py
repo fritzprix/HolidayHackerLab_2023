@@ -21,7 +21,7 @@ class ScaledDotProductAttention(torch.nn.Module):
 
 class MultiHeadAttention(torch.nn.Module):
 
-    def __init__(self, d_model, n_head, device=None, dtype: torch.dtype=torch.float, *args, **kwargs) -> None:
+    def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.n_head = n_head
         self.depth = d_model // n_head
@@ -68,25 +68,42 @@ class Transformer(torch.nn.Module):
 
     def __init__(self, n_head, d_model, device, dtype:torch.dtype=torch.float, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.input_norm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
         self.mha = MultiHeadAttention(d_model=d_model, n_head=n_head, device=device, dtype=dtype)
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype)
-        self.out_lnorm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
 
-    def forward(self, input:torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        mha_output = self.mha_lnorm(input + self.mha.forward(input, mask))
-        return self.out_lnorm(mha_output + self.pw_ff.forward(mha_output))
+    def forward(self, input:torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
+        # Pre-LayerNormalization from GPT-3, (note: Post-LayerNormalization is used for GPT-2 and original paper)
+        norm_input = self.input_norm.forward(input)
+        mha_output = input + self.mha.forward(norm_input, mask)
+        norm_mha_output = self.mha_lnorm(mha_output)
+        return mha_output + self.pw_ff.forward(norm_mha_output)
     
 
 class ToyGPT(L.LightningModule):
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, 
+                 vocab_size:int, 
+                 d_model:int, n_head:int, num_layers:int, pad_id:int=None,  device=None, dtype:torch.dtype=torch.float, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        
+        self.embedding = torch.nn.Embedding(vocab_size, d_model, padding_idx=pad_id, device=device, dtype=dtype)
+        self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=d_model, device=device, dtype=dtype) for _ in range(num_layers)])
+        self.output_linear = torch.nn.Linear(d_model, vocab_size, device=device, dtype=dtype)
 
-    def forward(self, X) -> torch.Tensor:
-        return super().forward(X)
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        # X should have shape of (B,N)
+        if len(X.shape) == 1:
+            X = X.unsqueeze(0)
+
+        return self.output_linear.forward(self.transformers.forward(self.embedding.forward(input=X)))
+    
 
     def training_step(self, batch_input, batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+
+
         return super().training_step(*args, **kwargs)
     
     def test_step(self, batch_input, batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
