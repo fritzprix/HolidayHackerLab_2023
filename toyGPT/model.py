@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Tuple, List
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 import torch
 import lightning as L
@@ -101,8 +101,24 @@ class ToyGPT(L.LightningModule):
         return self.output_linear.forward(self.transformers.forward(self.embedding.forward(input=X)))
     
 
-    def training_step(self, batch_input, batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+    def training_step(self, batch_input:Tuple[torch.Tensor], batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+        if len(batch_input) < 2:
+            raise ValueError('batch_input should be tuple of input and output')
+        X,y = batch_input # here X, y are both batched array of token_ids (B,N)
+        if X.shape != y.shape: # X,y shoud have B,N
+            raise ValueError('X and y should have same shape')
+        
+        B,seq_n = X.shape
+        mask = torch.triu(torch.ones((B,seq_n, seq_n)))
+        
+        X_wemb = self.embedding.forward(X)  # dense word vector
+        
+        
+        self.transformers.forward()
 
+        
+        
+        
 
         return super().training_step(*args, **kwargs)
     
