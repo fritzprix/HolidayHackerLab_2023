@@ -91,6 +91,7 @@ class ToyGPT(L.LightningModule):
         self.embedding = torch.nn.Embedding(vocab_size, d_model, padding_idx=pad_id, device=device, dtype=dtype)
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=d_model, device=device, dtype=dtype) for _ in range(num_layers)])
         self.output_linear = torch.nn.Linear(d_model, vocab_size, device=device, dtype=dtype)
+        self.loss = torch.nn.CrossEntropyLoss()
 
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
@@ -101,26 +102,36 @@ class ToyGPT(L.LightningModule):
         return self.output_linear.forward(self.transformers.forward(self.embedding.forward(input=X)))
     
 
-    def training_step(self, batch_input:Tuple[torch.Tensor], batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        if len(batch_input) < 2:
-            raise ValueError('batch_input should be tuple of input and output')
-        X,y = batch_input # here X, y are both batched array of token_ids (B,N)
+    def training_step(self, data: torch.Tensor, batch_index:Any, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+
+        if len(data) < 3:
+            raise ValueError('data should be tuple of (input, output, attention_mask)')
+        X, y, attention_mask = data # here X, y are both batched array of token_ids (B,N)
+        
         if X.shape != y.shape: # X,y shoud have B,N
             raise ValueError('X and y should have same shape')
         
-        B,seq_n = X.shape
-        mask = torch.triu(torch.ones((B,seq_n, seq_n)))
-        
         X_wemb = self.embedding.forward(X)  # dense word vector
-        
-        
-        self.transformers.forward()
+        hidden_output = self.transformers.forward(X_wemb, attention_mask)
+        logits = self.output_linear.forward(hidden_output)
 
-        
-        
-        
-
-        return super().training_step(*args, **kwargs)
+        loss = self.loss(logits, y)
+        return {"train_loss":loss}
     
-    def test_step(self, batch_input, batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        return super().test_step(*args, **kwargs)
+    def test_step(self, data, batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+
+        if len(data) < 3:
+            raise ValueError('data should be tuple of (input, output, attention_mask)')
+        X, y, attention_mask = data
+
+        if X.shape != y.shape:
+            raise ValueError('X and y should have same shape')
+        
+        X_wemb = self.embedding.forward(X)
+        hidden_output = self.transformers.forward(X_wemb, attention_mask)
+        logits = self.output_linear.forward(hidden_output)
+
+        loss = self.loss(logits, y)
+        return {"test_loss":loss}
+    
+
