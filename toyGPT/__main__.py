@@ -1,44 +1,77 @@
 import argparse
+import torch
 from datasets import load_dataset
 from model import ToyGPT
-from data import Preprocessor
-from typing import Any
+from data import Preprocessor, convert_pdf_to_json, raw_text_to_json, WikiSourceDataModule
 from transformers import GPT2Tokenizer,PreTrainedTokenizer
 import os
+import lightning as L
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
+from lightning.pytorch.loggers import WandbLogger
+import wandb
 
 
-def process_dataset(args):
-    tokenizer: PreTrainedTokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    preprocessor = Preprocessor(tokenizer=tokenizer)
-    files = os.listdir(args.data)
-    dataset = load_dataset('json', data_files=[os.path.join(args.data, file) for file in files])
-    dataset = dataset.map(lambda d: preprocessor(d["text"]))
-    print(dataset)
-    print(next(dataset['input_ids']).shape)
-    dataset.save_to_disk('dataset/train')
-    return dataset
 
-def train(args):
+
+def get_tokenizer() -> PreTrainedTokenizer:
+    
     tokenizer: PreTrainedTokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     tokenizer.add_special_tokens({"pad_token": "<pad>", "bos_token":"<s>", "eos_token":"</s>"})
-    dataset = process_dataset(args)
-    
-    pass
+    return tokenizer
 
+
+def download(args):
+    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=512)
+    wikisource_data.prepare_data()
+        
+
+def train(args):
+    # will use GPU whenever it's available
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    print(f"training performed on {device}")
+    torch.set_float32_matmul_precision('high') # enable bfloat16 fast matmul
+
+    # initialize wandb
+    wandb.login()
+    wandb.init(project="toygpt", config={
+        "batch_size": args.batch,
+        "learning_rate": args.lr,
+    })
+
+    wandb_logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
+    
+    trainer = L.Trainer(max_epochs=1, val_check_interval=500, callbacks=[
+        EarlyStopping(monitor='val_loss', mode='min', patience=3),
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{epoch}-{val_loss:.3f}', save_top_k=2)
+    ],logger=wandb_logger)
+
+    
+    tokenizer: PreTrainedTokenizer = get_tokenizer()
+    vocab_size = len(tokenizer)
+
+    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=512, batch_size=args.batch)
+    print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
+    model = ToyGPT(vocab_size, 768, 12, 12, tokenizer.pad_token_id, device=device, dtype=torch.float32, dropout=0.2, weight_decay=args.wd, lr=args.lr)
+    trainer.fit(model, wikisource_data)
+    wandb.finish(0)
 
 
 if __name__ == '__main__':
     arg_parser = argparse.ArgumentParser('__main__.py')
     arg_parser.set_defaults(func= lambda _: arg_parser.print_help())
     sub_parser = arg_parser.add_subparsers()
+
+    down_parser = sub_parser.add_parser('download', help='download data')
+    down_parser.set_defaults(func=download)
     
     train_parser = sub_parser.add_parser('train', help='train model')
     train_parser.set_defaults(func=train)
     train_parser.add_argument('-c', '--config', type=str, default='train_config.json', help='configuration file for training')
+    train_parser.add_argument('-b', '--batch', type=int, default=4, help='batch_size for training')
+    train_parser.add_argument('-r', '--lr', type=float, default=1e-5, help='learning rate')
+    train_parser.add_argument('-d', '--wd', type=float, default=0.01, help='weight decay for Adam optimizer')
     
-    process_parser = sub_parser.add_parser('data', help='process data and build dataset for training')
-    process_parser.set_defaults(func=process_dataset)
-    process_parser.add_argument('-d', '--data', type=str, default='processed')
 
     args = arg_parser.parse_args()
     args.func(args)
