@@ -15,7 +15,7 @@ from unstructured.cleaners.core import (
 import re
 import json
 from unstructured.cleaners.core import clean
-
+import torch
 
 class SentenceChunker:
     """
@@ -46,9 +46,10 @@ class SentenceChunker:
         # Clean the text and split it into sentences
         clean_text = replace_unicode_quotes(clean_ligatures(clean(text, extra_whitespace=True)))
         sentences = re.split(r'(?<=[.!?])\s+', clean_text)
-        return [sentence for sentence in sentences]
+        return [f'{sentence}' for sentence in sentences]
 
     def __init__(self, tokenizer: PreTrainedTokenizer, max_length:int) -> None:
+        print('test v1.0')
         """
         Initializes the SentenceChunker with a tokenizer and a maximum length.
 
@@ -77,9 +78,10 @@ class SentenceChunker:
         if isinstance(batch, str):
             batch = [batch]
 
+
         # Split each sequence in the batch into sentences and encode them
         batch_of_chunks = [self._split_into_sentences(seq) for seq in batch]
-        batch_of_encodings = [self.tokenizer.batch_encode_plus(chunks, return_length=True, padding=False) for chunks in batch_of_chunks]
+        batch_of_encodings = [self.tokenizer.batch_encode_plus(chunks, return_length=True, add_special_tokens=True) for chunks in batch_of_chunks]
 
         result = {"success": [], "failure": []}
         success_batch_bucket = []
@@ -92,9 +94,14 @@ class SentenceChunker:
 
             # Process each sentence in the sequence
             for n, token_count in enumerate(encodings["length"]):
+                token_count += 2 # splitting sequence removes space between two adjacent sequence in the process, so 1 token is accounted
                 # Handle sentences that exceed the max length
                 if token_count > self.max_length:
                     failure_batch_bucket.append({"text":batch_of_chunks[bi][n], "length": token_count})
+                    if len(bucket) > 0: # something in the bucket, complete a sequence and start new sequence, because dropping the middle causes discontinuity
+                        success_batch_bucket.append({"text":' '.join(bucket), "length": tokens_total})
+                        bucket.clear()
+                        tokens_total = 0
                     continue
 
                 # Check if adding the sentence would exceed the max length
@@ -141,12 +148,13 @@ class WikiSourceDataModule(L.LightningDataModule):
         self.train_size = train_size
         self.batch_size = batch_size
         self.num_proc = num_proc
+        self.dataset = None
 
 
     def prepare_data(self) -> None:
 
         def transform(v:Dict[str, Any]) -> str:
-            return {"length": v["length"], "text": f"<s>{v['text']}</s>"}
+            return {"length": v["length"], "text": f"<|startoftext|>{v['text']}<|endoftext|>"}
         
         sentence_chunker = SentenceChunker(self.tokenizer, self.max_length - 2)
         datasets = [load_dataset('wikimedia/wikisource', f"20231201.{lang}")["train"].map(lambda b: sentence_chunker(b["text"]), batched=True, num_proc=self.num_proc).flatten() for lang in self.languages]
@@ -155,24 +163,27 @@ class WikiSourceDataModule(L.LightningDataModule):
         success_ds.save_to_disk('local_dscache')
 
     def setup(self, stage: str) -> None:
-        self.dataset = load_from_disk('local_dscache')
-        self.train_dataset = self.dataset['train'].train_test_split(test_size=(1 - self.train_size), train_size=self.train_size)
+        if self.dataset is None:
+            self.dataset = load_from_disk('local_dscache')
+            self.train_dataset = self.dataset['train'].shuffle().train_test_split(test_size=(1 - self.train_size), train_size=self.train_size)
 
         return super().setup(stage)
 
     def _tokenize(self, data):
-            inputs = data['text']
-            return self.tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True, return_length=True, max_length=self.max_length)
+        inputs = data['text']
+        return self.tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True, return_length=True, max_length=self.max_length)
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
-        train_dataset = self.train_dataset["train"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size, num_proc=self.num_proc)
-        return data.DataLoader(train_dataset.with_format(type="torch"))
+        train_dataset = self.train_dataset["train"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
+        return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        val_dataset = self.train_dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size, num_proc=self.num_proc)
-        return data.DataLoader(val_dataset.with_format(type="torch"))
+        val_dataset = self.train_dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
+        return data.DataLoader(val_dataset.with_format(type="torch"), num_workers=self.num_proc)
     
     def test_dataloader(self) -> EVAL_DATALOADERS:
-        test_dataset = self.dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size, num_proc=self.num_proc)
-        return data.DataLoader(test_dataset.with_format(type="torch"))
+        test_dataset = self.dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
+        return data.DataLoader(test_dataset.with_format(type="torch"), num_workers=self.num_proc)
     
+
+"""https://discuss.huggingface.co/t/map-fails-for-more-than-4-processes/58567/3"""

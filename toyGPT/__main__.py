@@ -13,12 +13,12 @@ import wandb
 def get_tokenizer() -> PreTrainedTokenizer:
     
     tokenizer: PreTrainedTokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    tokenizer.add_special_tokens({"pad_token": "<pad>", "bos_token":"<s>", "eos_token":"</s>"})
+    tokenizer.add_special_tokens({"pad_token": "<pad>", "bos_token":"<|startoftext|>", "eos_token":"<|endoftext|>"}) # special 
     return tokenizer
 
 
 def download(args):
-    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=512)
+    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=510, num_proc=15)
     wikisource_data.prepare_data()
         
 
@@ -46,7 +46,7 @@ def train(args):
     tokenizer: PreTrainedTokenizer = get_tokenizer()
     vocab_size = len(tokenizer)
 
-    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=512, batch_size=args.batch)
+    wikisource_data = WikiSourceDataModule(get_tokenizer(), languages=['ko'], max_length=512, batch_size=args.batch, num_proc=15, train_size=0.99)
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
     model = ToyGPT(vocab_size, 768, 12, 12, tokenizer.pad_token_id, device=device, dtype=torch.float32, dropout=0.2, weight_decay=args.wd, lr=args.lr)
     trainer.fit(model, wikisource_data)

@@ -15,7 +15,7 @@ class ScaledDotProductAttention(torch.nn.Module):
         # qk = (b,1,n)
         scaled_qk = q@torch.transpose(k, 2, 1) / self.dk
         if mask is not None:
-            masked_scaled_qk = torch.masked_fill(scaled_qk, mask=mask.bitwise_not(), value=-1e4)
+            masked_scaled_qk = torch.masked_fill(scaled_qk, mask=mask.bitwise_not(), value=float('-inf'))
         attention_weights = torch.softmax(masked_scaled_qk, dim=-1)
         return  attention_weights @  v
         
@@ -107,30 +107,24 @@ class ToyGPT(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.decay)
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer=optimizer,schedulers=[
             torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=self.eps, total_iters=2000, end_factor=1),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=2000, eta_min=self.eps)
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=4000, eta_min=(self.lr / 10))
         ],milestones=[2000])
         lr_scheduler_config = {
-            # REQUIRED: The scheduler instance
             "scheduler": lr_scheduler,
-            # The unit of the scheduler's step size, could also be 'step'.
-            # 'epoch' updates the scheduler on epoch end whereas 'step'
-            # updates it after a optimizer update.
             "interval": "step",
-            # How many epochs/steps should pass between calls to
-            # `scheduler.step()`. 1 corresponds to updating the learning
-            # rate after every epoch/step.
             "frequency": 1,
-            # Metric to to monitor for schedulers like `ReduceLROnPlateau`
             "name": "CosineWithWarmUp",
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         # X should have shape of (B,N)
+        X: torch.Tensor = input["input_ids"]
+        attention_mask: torch.Tensor = input["attention_mask"]
         if len(X.shape) == 1:
             X = X.unsqueeze(0)
 
-        return self.output_linear.forward(self.transformers.forward((self.embedding.forward(input=X), None)))
+        return self.output_linear.forward(self.transformers.forward((self.embedding.forward(input=X), attention_mask.bool())))
     
 
     def training_step(self, data: Tuple[torch.Tensor], batch_index:Any, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
@@ -148,17 +142,20 @@ class ToyGPT(L.LightningModule):
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) # I think this will get loss for all next token prediction, I mean data[0:-1] vs data[1:0]
-        self.log("train_loss", loss)
+        # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
+        if batch_index % 10 == 0:
+            lr = self.trainer.optimizers[0].param_groups[0]['lr']
+            # log train loss not too much frequently
+            self.log("train_loss", loss)
+            self.log("lr", lr)
+
 
         return {"batch_index": batch_index, "loss":loss}
     
 
     def validation_step(self, data: Tuple[torch.Tensor], batch_index,*args: Any, **kwargs: Any) -> STEP_OUTPUT:
         
-        # if len(data) < 3:
-        #     raise ValueError('data should be tuple of (input, output, attention_mask)')
-        # X, y, attention_mask = data # here X, y are both batched array of token_ids (B,N)
         X, padding_mask = data["input_ids"], data["attention_mask"]
 
         input:torch.Tensor = X[:,:-1]
@@ -172,29 +169,31 @@ class ToyGPT(L.LightningModule):
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) # I think this will get loss for all next token prediction, I mean data[0:-1] vs data[1:0]
+        # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
         self.log("val_loss", loss)
-
         return {"batch_index": batch_index, "val_loss":loss}
     
     
     def test_step(self, data: Tuple[torch.Tensor], batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        
-        # if len(data) < 3:
-        #     raise ValueError('data should be tuple of (input, output, attention_mask)')
+       
+        X, padding_mask = data["input_ids"], data["attention_mask"]
 
-        X, attention_mask = data["input_ids"], data["attention_mask"]
-        input = X[:,:-1,:]
-        target = X[:,1:,:]
+        input:torch.Tensor = X[:,:-1]
+        target:torch.Tensor = X[:,1:].long()
+        B,n = input.shape
 
-        
-        # X, y, attention_mask = data # here X, y are both batched array of token_ids (B,N)
-        
-        X_wemb = self.embedding.forward(input)  # dense word vector
+        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)) * padding_mask[:,1:].unsqueeze(1)
+        attention_mask = attention_mask.bool()
+
+        X_wemb = self.embedding(input)  # dense word vector
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.view(-1)) # I think this will get loss for all next token prediction, I mean data[0:-1] vs data[1:0]
-        return {"batch_index": batch_index, "test_loss":loss}
+        # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
+        self.log("test_loss", loss)
+
+        return {"batch_index": batch_index, "val_loss":loss}
     
 
