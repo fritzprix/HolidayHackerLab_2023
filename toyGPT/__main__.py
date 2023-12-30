@@ -1,17 +1,13 @@
 import argparse
 import torch
-from datasets import load_dataset
 from model import ToyGPT
-from data import Preprocessor, convert_pdf_to_json, raw_text_to_json, WikiSourceDataModule
+from data import WikiSourceDataModule
 from transformers import GPT2Tokenizer,PreTrainedTokenizer
-import os
 import lightning as L
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 import wandb
-
-
 
 
 def get_tokenizer() -> PreTrainedTokenizer:
