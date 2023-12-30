@@ -162,3 +162,5 @@ cython_debug/
 wandb
 checkpoints
 local_dscache
+__pycache__
+__pypackages__
