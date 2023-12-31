@@ -1,0 +1,7 @@
+{
+    "name":"toygpt.small",
+    "n_layer":12,
+    "n_head":12,
+    "block_size":512,
+    "n_embed":768
+}

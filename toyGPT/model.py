@@ -1,4 +1,4 @@
-from typing import Any, Tuple, List
+from typing import Any, Tuple, Dict
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 import torch
 import lightning as L
@@ -90,18 +90,21 @@ class ToyGPT(L.LightningModule):
 
     def __init__(self, 
                  vocab_size:int, 
-                 d_model:int, n_head:int, num_layers:int, pad_id:int=None,  device=None, 
-                 dtype:torch.dtype=torch.float32, dropout:float=0.2, lr=1e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
+                 block_size:int,
+                 n_embed:int, n_head:int, n_layer:int, pad_id:int=None,  device=None, 
+                 dtype:torch.dtype=torch.float32, dropout:float=0.2, lr=1e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, name: str='toygpt', *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(ignore=['dtype', 'device'])
+        self.name = name
         self.lr = lr
         self.betas = betas
         self.eps = eps
         self.decay = weight_decay
-        self.embedding = torch.nn.Embedding(vocab_size, d_model, padding_idx=pad_id, device=device, dtype=dtype)
-        self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=d_model, device=device, dtype=dtype, dropout=dropout) for _ in range(num_layers)])
-        self.output_linear = torch.nn.Linear(d_model, vocab_size, device=device, dtype=dtype)
-        self.loss = torch.nn.CrossEntropyLoss()
+        self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id, device=device, dtype=dtype)
+        self.pos_embedding = torch.nn.Embedding(block_size, n_embed, device=device, dtype=dtype)
+        self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
+        self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
+        self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.decay)
@@ -117,33 +120,34 @@ class ToyGPT(L.LightningModule):
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: Dict[str, torch.Tensor]) -> torch.Tensor:
         # X should have shape of (B,N)
         X: torch.Tensor = input["input_ids"]
         attention_mask: torch.Tensor = input["attention_mask"]
         if len(X.shape) == 1:
             X = X.unsqueeze(0)
 
-        return self.output_linear.forward(self.transformers.forward((self.embedding.forward(input=X), attention_mask.bool())))
-    
+        hs, _ = self.transformers.forward((self.embedding.forward(input=X), attention_mask.bool()))
+        return torch.softmax(self.output_linear.forward(hs[:,-1,:]), -1)
+
 
     def training_step(self, data: Tuple[torch.Tensor], batch_index:Any, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-  
-        X, padding_mask = data["input_ids"], data["attention_mask"]
+        
+        X = data["input_ids"]
 
-        input:torch.Tensor = X[:,:-1].long()
+        input:torch.Tensor = X[:,:-1]
         target:torch.Tensor = X[:,1:].long()
         B,n = input.shape
 
-        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)) * padding_mask[:,1:].unsqueeze(1)
-        attention_mask = attention_mask.bool()
+        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
+        
 
-        X_wemb = self.embedding(input)  # dense word vector
+        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1))
         if batch_index % 10 == 0:
             lr = self.trainer.optimizers[0].param_groups[0]['lr']
             # log train loss not too much frequently
@@ -156,42 +160,40 @@ class ToyGPT(L.LightningModule):
 
     def validation_step(self, data: Tuple[torch.Tensor], batch_index,*args: Any, **kwargs: Any) -> STEP_OUTPUT:
         
-        X, padding_mask = data["input_ids"], data["attention_mask"]
+        X = data["input_ids"]
 
         input:torch.Tensor = X[:,:-1]
         target:torch.Tensor = X[:,1:].long()
         B,n = input.shape
 
-        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)) * padding_mask[:,1:].unsqueeze(1)
-        attention_mask = attention_mask.bool()
+        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
-        X_wemb = self.embedding(input)  # dense word vector
+        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1))
         self.log("val_loss", loss)
         return {"batch_index": batch_index, "val_loss":loss}
     
     
     def test_step(self, data: Tuple[torch.Tensor], batch_index, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
        
-        X, padding_mask = data["input_ids"], data["attention_mask"]
+        X = data["input_ids"]
 
         input:torch.Tensor = X[:,:-1]
         target:torch.Tensor = X[:,1:].long()
         B,n = input.shape
 
-        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)) * padding_mask[:,1:].unsqueeze(1)
-        attention_mask = attention_mask.bool()
+        attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
-        X_wemb = self.embedding(input)  # dense word vector
+        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
-        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1)) / B
+        loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1))
         self.log("test_loss", loss)
 
         return {"batch_index": batch_index, "val_loss":loss}
