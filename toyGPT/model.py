@@ -51,7 +51,8 @@ class MultiHeadAttentionV2(torch.nn.Module):
 
         scaled_dot_product = q@k.transpose(-1,-2) * (1 / math.sqrt(k.size(-1))) # (B, n_h, n_seq, n_seq)
         if mask is not None:
-            scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.bitwise_not(), value=float('-inf'))
+            # shape of given mask (B, n_seq, n_seq) we have to unsqueeze to get (B, 1, n_seq,n_seq) so it can be broadcast to (B,n_head, n_seq,n_seq)
+            scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.unsqueeze(1).bitwise_not(), value=float('-inf'))
         sdp_out: torch.Tensor = scaled_dot_product.softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
 
         return self.out_linear(sdp_out.transpose(1,2).contiguous().view(B,n_seq, C))
