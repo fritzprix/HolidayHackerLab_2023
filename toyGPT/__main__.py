@@ -52,7 +52,7 @@ def train(args):
     wandb_logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
     
     trainer = L.Trainer(max_epochs=1, val_check_interval=500, callbacks=[
-        # EarlyStopping(monitor='val_loss', mode='min', patience=3),
+        EarlyStopping(monitor='val_loss', mode='min', patience=3),
         ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{epoch}-{val_loss:.3f}', save_top_k=2)
     ],logger=wandb_logger, max_steps=20000)
 
@@ -66,28 +66,11 @@ def train(args):
     trainer.fit(model, wikisource_data)
     wandb.finish(0)
 
-# def generate(args):
-#     device = get_device()
-#     tokenizer = get_tokenizer()
-#     model = ToyGPT.load_from_checkpoint('checkpoints/last-v3.ckpt').to(device)
-#     model = model.eval()
-#     promt = f"{tokenizer.bos_token}{args.prompt}"
-#     input = tokenizer(promt, return_attention_mask=True, return_tensors="pt").to(device)
-#     # while last_id != tokenizer.eos_token_id:
-#     for _ in range(30):
-#         input_ids = input["input_ids"]
-#         output_ids = model.forward(input)
-#         print(output_ids)
-#         if output_ids[0] == tokenizer.eos_token_id:
-#             break
-#         input = {"input_ids":torch.concat((input_ids, output_ids.unsqueeze(0)), dim=-1), "attention_mask":torch.ones((1, input_ids.shape[-1] + 1), device=device)}
-#         print(input["input_ids"])
-#     print(tokenizer.batch_decode(input['input_ids'] ,skip_special_tokens=True, clean_up_tokenization_spaces=True))
     
 def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
-    model = ToyGPT.load_from_checkpoint('checkpoints/last-v3.ckpt').to(device)
+    model = ToyGPT.load_from_checkpoint('checkpoints/model-v4.ckpt').to(device)
     model.eval()
 
     prompt = f"{tokenizer.bos_token}{args.prompt}"

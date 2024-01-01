@@ -1,6 +1,7 @@
 from typing import Any, Tuple, Dict
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 import torch
+import math
 import lightning as L
 
 class ScaledDotProductAttention(torch.nn.Module):
@@ -13,9 +14,9 @@ class ScaledDotProductAttention(torch.nn.Module):
         # input should have (B,N,d_model)
         # q (b,1,d_model) , k (b,n,d_model)
         # qk = (b,1,n)
-        scaled_qk = q@torch.transpose(k, 2, 1) / self.dk
+        scaled_qk = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
         if mask is not None:
-            masked_scaled_qk = torch.masked_fill(scaled_qk, mask=mask.bitwise_not(), value=float('-inf'))
+            masked_scaled_qk = scaled_qk.masked_fill(mask=mask.bitwise_not(), value=float('-inf'))
         attention_weights = torch.softmax(masked_scaled_qk, dim=-1)
         return  attention_weights @  v
         
@@ -93,6 +94,7 @@ class ToyGPT(L.LightningModule):
                  block_size:int,
                  n_embed:int, n_head:int, n_layer:int, pad_id:int=None,  device=None, 
                  dtype:torch.dtype=torch.float32, dropout:float=0.2, lr=1e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, name: str='toygpt', *args, **kwargs) -> None:
+        
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(ignore=['dtype', 'device'])
         self.name = name
@@ -105,6 +107,15 @@ class ToyGPT(L.LightningModule):
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
         self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, torch.nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, torch.nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.decay)
@@ -127,7 +138,8 @@ class ToyGPT(L.LightningModule):
         if len(X.shape) == 1:
             X = X.unsqueeze(0)
 
-        hs, _ = self.transformers.forward((self.embedding.forward(input=X), attention_mask.bool()))
+        X_wemb = self.embedding(X) + self.pos_embedding(torch.arange(0, X.shape[-1],device=X.device, dtype=torch.long)) # word embedding + postion embedding
+        hs, _ = self.transformers.forward((X_wemb, attention_mask.bool()))
         return torch.softmax(self.output_linear.forward(hs[:,-1,:]), -1)
 
 
