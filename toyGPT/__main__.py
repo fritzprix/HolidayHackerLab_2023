@@ -51,16 +51,16 @@ def train(args):
 
     wandb_logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
     
-    trainer = L.Trainer(max_epochs=1, val_check_interval=500, callbacks=[
-        EarlyStopping(monitor='val_loss', mode='min', patience=3),
+    trainer = L.Trainer(max_epochs=1, val_check_interval=2000, callbacks=[
+        EarlyStopping(monitor='val_loss', mode='min', patience=10),
         ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{epoch}-{val_loss:.3f}', save_top_k=2)
-    ],logger=wandb_logger, max_steps=20000)
+    ],logger=wandb_logger)
 
     
     tokenizer: PreTrainedTokenizer = get_tokenizer()
     vocab_size = len(tokenizer)
 
-    wikisource_data = WikiSourceDataModule(get_tokenizer(), languages=['ko'], max_length=config['block_size'], batch_size=args.batch, num_proc=15, train_size=0.99)
+    wikisource_data = WikiSourceDataModule(get_tokenizer(), languages=['en'], max_length=config['block_size'], batch_size=args.batch, num_proc=15, train_size=0.99)
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
     model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, device=device, dtype=torch.float32, dropout=0.2, weight_decay=args.wd, lr=args.lr, **config)
     trainer.fit(model, wikisource_data)
@@ -70,7 +70,7 @@ def train(args):
 def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
-    model = ToyGPT.load_from_checkpoint('checkpoints/model-v4.ckpt').to(device)
+    model = ToyGPT.load_from_checkpoint('checkpoints/model-v7.ckpt').to(device)
     model.eval()
 
     prompt = f"{tokenizer.bos_token}{args.prompt}"
