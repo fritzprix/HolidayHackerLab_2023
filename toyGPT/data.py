@@ -175,15 +175,15 @@ class WikiSourceDataModule(L.LightningDataModule):
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         train_dataset = self.train_dataset["train"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
-        return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc)
+        return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
         val_dataset = self.train_dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
-        return data.DataLoader(val_dataset.with_format(type="torch"), num_workers=self.num_proc)
+        return data.DataLoader(val_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def test_dataloader(self) -> EVAL_DATALOADERS:
         test_dataset = self.dataset["test"].shuffle().map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
-        return data.DataLoader(test_dataset.with_format(type="torch"), num_workers=self.num_proc)
+        return data.DataLoader(test_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
 
 """https://discuss.huggingface.co/t/map-fails-for-more-than-4-processes/58567/3"""

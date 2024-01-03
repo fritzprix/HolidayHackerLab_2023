@@ -12,8 +12,8 @@ class ScaledDotProductAttention(torch.nn.Module):
     
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         # input should have (B,N,d_model)
-        # q (b,1,d_model) , k (b,n,d_model)
-        # qk = (b,1,n)
+        # q (b,n,d_model) , k (b,n,d_model)
+        # qk = (b,n,n)
         scaled_qk = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
         if mask is not None:
             masked_scaled_qk = scaled_qk.masked_fill(mask=mask.bitwise_not(), value=float('-inf'))
@@ -21,12 +21,51 @@ class ScaledDotProductAttention(torch.nn.Module):
         return  attention_weights @  v
         
 
-class MultiHeadAttention(torch.nn.Module):
+
+class MultiHeadAttentionV2(torch.nn.Module):
+
+    def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float32, dropout:float=0.2, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.n_head = n_head
+        self.dropout = dropout
+
+        self.attn_proj = torch.nn.Sequential(torch.nn.Linear(d_model, 3 * d_model, device=device, dtype=dtype),
+                                             torch.nn.Dropout(self.dropout))
+        
+        self.out_linear = torch.nn.Linear(d_model, d_model)
+
+        
+    def forward(self, input: torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
+        if len(input.shape) == 2:
+            input = input.unsqueeze(0)
+        if len(input.shape) != 3:
+            raise ValueError(f'unsupported tensor shape: {input.shape}, should be form of (B,N,d)')
+        
+        
+        B,n_seq,C = input.size()
+        q ,k, v = self.attn_proj(input).split(C, dim=-1)
+        
+        q = q.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2) # (B, n_h, n_seq, d_h)
+        k = k.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2) # (B, n_h, n_seq, d_h)
+        v = v.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2)
+
+        scaled_dot_product = q@k.transpose(-1,-2) * (1 / math.sqrt(k.size(-1))) # (B, n_h, n_seq, n_seq)
+        if mask is not None:
+            # shape of given mask (B, n_seq, n_seq) we have to unsqueeze to get (B, 1, n_seq,n_seq) so it can be broadcast to (B,n_head, n_seq,n_seq)
+            scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.unsqueeze(1).bitwise_not(), value=float('-inf'))
+        sdp_out: torch.Tensor = scaled_dot_product.softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
+
+        return self.out_linear(sdp_out.transpose(1,2).view(B,n_seq, C))
+
+
+
+class MultiHeadAttentionV1(torch.nn.Module):
 
     def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float32, dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.n_head = n_head
         self.depth = d_model // n_head
+        self.dropout = dropout
 
         self.q_linear = torch.nn.Sequential(torch.nn.Linear(d_model, d_model, device=device, dtype=dtype), torch.nn.Dropout(dropout))
         self.k_linear = torch.nn.Sequential(torch.nn.Linear(d_model, d_model, device=device, dtype=dtype), torch.nn.Dropout(dropout))
@@ -34,8 +73,9 @@ class MultiHeadAttention(torch.nn.Module):
 
         self.attns = torch.nn.ModuleList([ScaledDotProductAttention(d_model=self.depth, device=device, dtype=dtype) for _ in range(n_head)])
         self.output_linear = torch.nn.Linear(d_model, d_model, device=device, dtype=dtype)
-        self.dropout = torch.nn.Dropout(dropout)
-                
+        self.out_drop = torch.nn.Dropout(dropout)
+
+        
         
     def forward(self, input: torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
         if len(input.shape) == 2:
@@ -44,14 +84,15 @@ class MultiHeadAttention(torch.nn.Module):
             raise ValueError(f'unsupported tensor shape: {input.shape}, should be form of (B,N,d)')
         
         b,n,_ = input.shape
-        q = self.q_linear.forward(input).view((b, n, self.n_head, -1))
-        k = self.k_linear.forward(input).view((b, n, self.n_head, -1))
-        v = self.v_linear.forward(input).view((b, n, self.n_head, -1))
+        q = self.q_linear(input).view((b, n, self.n_head, -1))
+        k = self.k_linear(input).view((b, n, self.n_head, -1))
+        v = self.v_linear(input).view((b, n, self.n_head, -1))
+
 
         attn_output = torch.concat([self.attns[i].forward(q[:,:,i,:].view((b,n,self.depth)), 
                                             k[:,:,i,:].view((b,n, self.depth)), 
                                             v[:,:,i,:].view((b,n, self.depth)),mask=mask) for i in range(self.n_head)],dim=-1)
-        return self.dropout.forward(self.output_linear.forward(attn_output))
+        return self.out_drop(self.output_linear(attn_output))
         
 
 
@@ -73,7 +114,7 @@ class Transformer(torch.nn.Module):
     def __init__(self, n_head, d_model, device, dtype:torch.dtype=torch.float32,dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.input_norm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
-        self.mha = MultiHeadAttention(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
+        self.mha = MultiHeadAttentionV1(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype, dropout=dropout)
 
@@ -118,7 +159,7 @@ class ToyGPT(L.LightningModule):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.decay)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.decay)
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer=optimizer,schedulers=[
             torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=self.eps, total_iters=2000, end_factor=1),
             torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=4000, eta_min=(self.lr / 10))
