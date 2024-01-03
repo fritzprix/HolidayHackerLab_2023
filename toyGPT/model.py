@@ -12,8 +12,8 @@ class ScaledDotProductAttention(torch.nn.Module):
     
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         # input should have (B,N,d_model)
-        # q (b,1,d_model) , k (b,n,d_model)
-        # qk = (b,1,n)
+        # q (b,n,d_model) , k (b,n,d_model)
+        # qk = (b,n,n)
         scaled_qk = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
         if mask is not None:
             masked_scaled_qk = scaled_qk.masked_fill(mask=mask.bitwise_not(), value=float('-inf'))
@@ -55,7 +55,7 @@ class MultiHeadAttentionV2(torch.nn.Module):
             scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.unsqueeze(1).bitwise_not(), value=float('-inf'))
         sdp_out: torch.Tensor = scaled_dot_product.softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
 
-        return self.out_linear(sdp_out.transpose(1,2).contiguous().view(B,n_seq, C))
+        return self.out_linear(sdp_out.transpose(1,2).view(B,n_seq, C))
 
 
 
@@ -114,7 +114,7 @@ class Transformer(torch.nn.Module):
     def __init__(self, n_head, d_model, device, dtype:torch.dtype=torch.float32,dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.input_norm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
-        self.mha = MultiHeadAttentionV2(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
+        self.mha = MultiHeadAttentionV1(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype, dropout=dropout)
 

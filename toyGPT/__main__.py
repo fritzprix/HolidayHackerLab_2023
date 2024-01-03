@@ -70,7 +70,7 @@ def train(args):
 def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
-    model = ToyGPT.load_from_checkpoint('checkpoints/model-v7.ckpt').to(device)
+    model = ToyGPT.load_from_checkpoint('checkpoints/model-v8.ckpt').to(device)
     model.eval()
 
     prompt = f"{tokenizer.bos_token}{args.prompt}"
