@@ -6,20 +6,19 @@ import lightning as L
 
 class ScaledDotProductAttention(torch.nn.Module):
 
-    def __init__(self, d_model, device=None, dtype: torch.dtype=torch.float32, *args, **kwargs) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.dk = torch.sqrt(torch.scalar_tensor(d_model, device=device, dtype=dtype))
     
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        # input should have (B,N,d_model)
-        # q (b,n,d_model) , k (b,n,d_model)
-        # qk = (b,n,n)
-        scaled_qk = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
+        # input should have (B,N,d_model) where B is batch size, N is length of sequence, d_model is the dimension of word embedding vector
+        # q (B,N,d_model) , k (B,N,d_model)
+        # qk = (B,N,N)
+        scaled_qk: torch.Tensor = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
+        # mask should be tensor of bool (B,N,N)
         if mask is not None:
-            masked_scaled_qk = scaled_qk.masked_fill(mask=mask.bitwise_not(), value=float('-inf'))
-        attention_weights = torch.softmax(masked_scaled_qk, dim=-1)
+            scaled_qk = scaled_qk.masked_fill(mask.bitwise_not(), float('-inf'))
+        attention_weights = torch.softmax(scaled_qk, dim=-1)
         return  attention_weights @  v
-        
 
 
 class MultiHeadAttentionV2(torch.nn.Module):
@@ -64,18 +63,18 @@ class MultiHeadAttentionV1(torch.nn.Module):
     def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float32, dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.n_head = n_head
-        self.depth = d_model // n_head
+        self.d_head = d_model // n_head
         self.dropout = dropout
 
-        self.q_linear = torch.nn.Sequential(torch.nn.Linear(d_model, d_model, device=device, dtype=dtype), torch.nn.Dropout(dropout))
-        self.k_linear = torch.nn.Sequential(torch.nn.Linear(d_model, d_model, device=device, dtype=dtype), torch.nn.Dropout(dropout))
-        self.v_linear = torch.nn.Sequential(torch.nn.Linear(d_model, d_model, device=device, dtype=dtype), torch.nn.Dropout(dropout))
+        self.qkv_proj = torch.nn.Sequential(
+            torch.nn.Linear(d_model, 3 * d_model, device=device, dtype=dtype), 
+            torch.nn.Dropout(dropout))
 
-        self.attns = torch.nn.ModuleList([ScaledDotProductAttention(d_model=self.depth, device=device, dtype=dtype) for _ in range(n_head)])
+        self.attns = torch.nn.ModuleList([ScaledDotProductAttention() for _ in range(n_head)])
+        
         self.output_linear = torch.nn.Linear(d_model, d_model, device=device, dtype=dtype)
         self.out_drop = torch.nn.Dropout(dropout)
 
-        
         
     def forward(self, input: torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
         if len(input.shape) == 2:
@@ -83,15 +82,20 @@ class MultiHeadAttentionV1(torch.nn.Module):
         if len(input.shape) != 3:
             raise ValueError(f'unsupported tensor shape: {input.shape}, should be form of (B,N,d)')
         
-        b,n,_ = input.shape
-        q = self.q_linear(input).view((b, n, self.n_head, -1))
-        k = self.k_linear(input).view((b, n, self.n_head, -1))
-        v = self.v_linear(input).view((b, n, self.n_head, -1))
+        batch_size,seq_n, d_model = input.shape
+        qkv_bundle: torch.Tensor = self.qkv_proj(input)
+        q,k,v:torch.Tensor = qkv_bundle.split(d_model,-1)
+        
+        q = q.view((batch_size, seq_n, -1, self.d_head)).transpose(1, 2)
+        k = k.view((batch_size, seq_n, -1, self.d_head)).transpose(1, 2)
+        v = v.view((batch_size, seq_n, -1, self.d_head)).transpose(1, 2)
+        # now Q,K,V have shape of (batch_size, seq_n, n_head, d_head)
 
 
-        attn_output = torch.concat([self.attns[i].forward(q[:,:,i,:].view((b,n,self.depth)), 
-                                            k[:,:,i,:].view((b,n, self.depth)), 
-                                            v[:,:,i,:].view((b,n, self.depth)),mask=mask) for i in range(self.n_head)],dim=-1)
+        attn_output = torch.concat([self.attns[i].forward(q[:,i,:,:].view((batch_size,seq_n,self.d_head)), 
+                                            k[:,i,:,:].view((batch_size,seq_n, self.d_head)), 
+                                            v[:,i,:,:].view((batch_size,seq_n, self.d_head)),mask=mask) for i in range(self.n_head)],dim=-1)
+        
         return self.out_drop(self.output_linear(attn_output))
         
 
