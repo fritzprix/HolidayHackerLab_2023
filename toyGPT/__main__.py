@@ -6,6 +6,7 @@ from model import ToyGPT
 from data import WikiSourceDataModule
 from transformers import GPT2Tokenizer,PreTrainedTokenizer
 import lightning as L
+from lightning import Fabric
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
@@ -23,18 +24,11 @@ def get_device() -> Any:
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-
-def download(args):
-    wikisource_data = WikiSourceDataModule(get_tokenizer(), max_length=510, num_proc=15)
-    wikisource_data.prepare_data()
-
-
 def get_config(path):
     with open(path) as fp:
         return json.load(fp)
     
 def train(args):
-    
     device = get_device()
     config = get_config(args.config)
 
@@ -62,7 +56,8 @@ def train(args):
 
     wikisource_data = WikiSourceDataModule(get_tokenizer(), languages=['en'], max_length=config['block_size'], batch_size=args.batch, num_proc=15, train_size=0.99)
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
-    model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, device=device, dtype=torch.float32, dropout=0.2, weight_decay=args.wd, lr=args.lr, **config)
+    model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, device=device, dtype=torch.float32, dropout=0.1, weight_decay=args.wd, lr=args.lr, **config)
+    
     trainer.fit(model, wikisource_data)
     wandb.finish(0)
 
@@ -98,15 +93,12 @@ if __name__ == '__main__':
     arg_parser.set_defaults(func= lambda _: arg_parser.print_help())
     sub_parser = arg_parser.add_subparsers()
 
-    down_parser = sub_parser.add_parser('download', help='download data')
-    down_parser.set_defaults(func=download)
-    
     train_parser = sub_parser.add_parser('train', help='train model')
     train_parser.set_defaults(func=train)
     train_parser.add_argument('-c', '--config', type=str, default='config.json', help='configuration file for training')
     train_parser.add_argument('-b', '--batch', type=int, default=4, help='batch_size for training')
-    train_parser.add_argument('-r', '--lr', type=float, default=1e-5, help='learning rate')
-    train_parser.add_argument('-d', '--wd', type=float, default=0.01, help='weight decay for Adam optimizer')
+    train_parser.add_argument('-r', '--lr', type=float, default=2.5e-4, help='learning rate')
+    train_parser.add_argument('-d', '--wd', type=float, default=0.1, help='weight decay for Adam optimizer')
 
     generate_parser = sub_parser.add_parser("generate", help='generate text using model')
     generate_parser.add_argument('-p', '--prompt', type=str, required=True)

@@ -31,6 +31,8 @@ class MultiHeadAttentionV2(torch.nn.Module):
         self.attn_proj = torch.nn.Sequential(torch.nn.Linear(d_model, 3 * d_model, device=device, dtype=dtype),
                                              torch.nn.Dropout(self.dropout))
         
+        self.attn_dropout = torch.nn.Dropout(self.dropout)
+        
         self.out_linear = torch.nn.Linear(d_model, d_model)
 
         
@@ -52,7 +54,8 @@ class MultiHeadAttentionV2(torch.nn.Module):
         if mask is not None:
             # shape of given mask (B, n_seq, n_seq) we have to unsqueeze to get (B, 1, n_seq,n_seq) so it can be broadcast to (B,n_head, n_seq,n_seq)
             scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.unsqueeze(1).bitwise_not(), value=float('-inf'))
-        sdp_out: torch.Tensor = scaled_dot_product.softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
+        
+        sdp_out: torch.Tensor = self.attn_dropout(scaled_dot_product).softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
 
         return self.out_linear(sdp_out.transpose(1,2).view(B,n_seq, C))
 
@@ -84,7 +87,7 @@ class MultiHeadAttentionV1(torch.nn.Module):
         
         batch_size,seq_n, d_model = input.shape
         qkv_bundle: torch.Tensor = self.qkv_proj(input)
-        q,k,v:torch.Tensor = qkv_bundle.split(d_model,-1)
+        q,k,v = qkv_bundle.split(d_model,-1)
         
         q = q.view((batch_size, seq_n, -1, self.d_head)).transpose(1, 2)
         k = k.view((batch_size, seq_n, -1, self.d_head)).transpose(1, 2)
@@ -121,16 +124,26 @@ class Transformer(torch.nn.Module):
         self.mha = MultiHeadAttentionV1(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype, dropout=dropout)
+        self.residual_dropout = torch.nn.Dropout(dropout)
 
     def forward(self, data:Tuple[torch.Tensor]) -> torch.Tensor:
         # Pre-LayerNormalization from GPT-3, (note: Post-LayerNormalization is used for GPT-2 and original paper)
         input, attention_mask = data
 
         norm_input = self.input_norm.forward(input)
-        mha_output = input + self.mha.forward(norm_input, attention_mask)
+        mha_output = self.residual_dropout(input) + self.mha.forward(norm_input, attention_mask)
         norm_mha_output = self.mha_lnorm(mha_output)
         return (mha_output + self.pw_ff.forward(norm_mha_output), attention_mask)
     
+
+def positional_embedding(d_model, max_length, dtype=None, device=None):
+        div_even = torch.pow(10000, torch.arange(0, d_model // 2, dtype=dtype, device=device) * 2 / d_model)
+        div_odd = torch.pow(10000, torch.arange(0, d_model // 2, dtype=dtype, device=device) * 2 / d_model)
+        pos = torch.arange(0, max_length, device=device, dtype=dtype).unsqueeze(-1)
+        pe = torch.zeros((max_length, d_model), device=device, dtype=dtype)
+        pe[:,0::2] = torch.sin(pos / div_even)
+        pe[:,1::2] = torch.cos(pos / div_odd)
+        return pe.requires_grad_(False)
 
 class ToyGPT(L.LightningModule):
 
@@ -148,12 +161,16 @@ class ToyGPT(L.LightningModule):
         self.eps = eps
         self.decay = weight_decay
         self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id, device=device, dtype=dtype)
-        self.pos_embedding = torch.nn.Embedding(block_size, n_embed, device=device, dtype=dtype)
+
+        self.pos_embedding = positional_embedding(d_model=n_embed, max_length=block_size, device=device, dtype=dtype).unsqueeze(0)
         self.embedding_dropout = torch.nn.Dropout(dropout)
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
         self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
         self.apply(self._init_weights)
+
+    
+    
 
     def _init_weights(self, module):
         if isinstance(module, torch.nn.Linear):
@@ -183,8 +200,9 @@ class ToyGPT(L.LightningModule):
         attention_mask: torch.Tensor = input["attention_mask"]
         if len(X.shape) == 1:
             X = X.unsqueeze(0)
-
-        X_wemb = self.embedding(X) + self.pos_embedding(torch.arange(0, X.shape[-1],device=X.device, dtype=torch.long)) # word embedding + postion embedding
+        N = X.size(1)
+        
+        X_wemb = self.embedding(X) + self.pos_embedding[:,:N,:] # word embedding + postion embedding
         hs, _ = self.transformers.forward((X_wemb, attention_mask.bool()))
         return torch.softmax(self.output_linear.forward(hs[:,-1,:]), -1)
 
@@ -200,7 +218,8 @@ class ToyGPT(L.LightningModule):
         attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
         
 
-        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
+        # X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
+        X_wemb = self.embedding(input) + self.pos_embedding[:,:n,:] # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
@@ -224,7 +243,7 @@ class ToyGPT(L.LightningModule):
 
         attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
-        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
+        X_wemb = self.embedding(input) + self.pos_embedding[:,:n,:] # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
@@ -244,7 +263,7 @@ class ToyGPT(L.LightningModule):
 
         attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
-        X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
+        X_wemb = self.embedding(input) + self.pos_embedding[:,:n,:] # word embedding + postion embedding
         hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
