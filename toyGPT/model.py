@@ -138,7 +138,7 @@ class ToyGPT(L.LightningModule):
                  vocab_size:int, 
                  block_size:int,
                  n_embed:int, n_head:int, n_layer:int, pad_id:int=None,  device=None, 
-                 dtype:torch.dtype=torch.float32, dropout:float=0.2, lr=1e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, name: str='toygpt', *args, **kwargs) -> None:
+                 dtype:torch.dtype=torch.float32, dropout:float=0.1, lr=2.5e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, name: str='toygpt', *args, **kwargs) -> None:
         
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(ignore=['dtype', 'device'])
@@ -149,6 +149,7 @@ class ToyGPT(L.LightningModule):
         self.decay = weight_decay
         self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id, device=device, dtype=dtype)
         self.pos_embedding = torch.nn.Embedding(block_size, n_embed, device=device, dtype=dtype)
+        self.embedding_dropout = torch.nn.Dropout(dropout)
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
         self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
@@ -200,8 +201,7 @@ class ToyGPT(L.LightningModule):
         
 
         X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
-        hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
-
+        hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
         loss = self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1))
@@ -210,7 +210,6 @@ class ToyGPT(L.LightningModule):
             # log train loss not too much frequently
             self.log("train_loss", loss)
             self.log("lr", lr)
-
 
         return {"batch_index": batch_index, "loss":loss}
     
@@ -226,7 +225,7 @@ class ToyGPT(L.LightningModule):
         attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
         X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
-        hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
+        hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
@@ -246,7 +245,7 @@ class ToyGPT(L.LightningModule):
         attention_mask:torch.Tensor = torch.tril(torch.ones((n,n), device=input.device)).unsqueeze(0).expand((B,n,n)).bool()
 
         X_wemb = self.embedding(input) + self.pos_embedding(torch.arange(0, input.shape[-1],device=input.device, dtype=torch.long)) # word embedding + postion embedding
-        hidden_output, _ = self.transformers.forward((X_wemb, attention_mask))
+        hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
 
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
@@ -254,5 +253,3 @@ class ToyGPT(L.LightningModule):
         self.log("test_loss", loss)
 
         return {"batch_index": batch_index, "val_loss":loss}
-    
-
