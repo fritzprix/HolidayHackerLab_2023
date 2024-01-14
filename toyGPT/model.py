@@ -21,19 +21,58 @@ class ScaledDotProductAttention(torch.nn.Module):
         return  attention_weights @  v
 
 
+class MultiHeadAttentionV3(torch.nn.Module):
+
+    def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float32, dropout:float=0.2, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.n_head = n_head
+        self.p_dropout = dropout
+
+        self.attn_proj = torch.nn.Sequential(torch.nn.Linear(d_model, 3 * d_model, device=device, dtype=dtype),
+                                             torch.nn.Dropout(dropout))
+        
+        self.attn_dropout = torch.nn.Dropout(dropout)
+        
+        self.out_linear = torch.nn.Linear(d_model, d_model)
+        self.out_dropout = torch.nn.Dropout(dropout)
+
+        
+    def forward(self, input: torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
+        if len(input.shape) == 2:
+            input = input.unsqueeze(0)
+        if len(input.shape) != 3:
+            raise ValueError(f'unsupported tensor shape: {input.shape}, should be form of (B,N,d)')
+        
+        
+        B,n_seq,C = input.size()
+        q ,k, v = self.attn_proj(input).split(C, dim=-1)
+        
+        q = q.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2) # (B, n_h, n_seq, d_h)
+        k = k.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2) # (B, n_h, n_seq, d_h)
+        v = v.view(B, n_seq, self.n_head, C // self.n_head).transpose(1,2)
+
+        sdp_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.p_dropout if self.training else 0)
+
+        # scaled_dot_product = q@k.transpose(-1,-2) * (1 / math.sqrt(k.size(-1))) # (B, n_h, n_seq, n_seq)
+        # if mask is not None:
+        #     # shape of given mask (B, n_seq, n_seq) we have to unsqueeze to get (B, 1, n_seq,n_seq) so it can be broadcast to (B,n_head, n_seq,n_seq)
+        #     scaled_dot_product = scaled_dot_product.masked_fill(mask=mask.unsqueeze(1).bitwise_not(), value=float('-inf'))
+
+        return self.out_dropout(self.out_linear(sdp_out.transpose(1,2).view(B, n_seq, C)))
+
 class MultiHeadAttentionV2(torch.nn.Module):
 
     def __init__(self, d_model:int, n_head:int, device=None, dtype: torch.dtype=torch.float32, dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.n_head = n_head
-        self.dropout = dropout
 
         self.attn_proj = torch.nn.Sequential(torch.nn.Linear(d_model, 3 * d_model, device=device, dtype=dtype),
-                                             torch.nn.Dropout(self.dropout))
+                                             torch.nn.Dropout(dropout))
         
-        self.attn_dropout = torch.nn.Dropout(self.dropout)
+        self.attn_dropout = torch.nn.Dropout(dropout)
         
         self.out_linear = torch.nn.Linear(d_model, d_model)
+        self.out_dropout = torch.nn.Dropout(dropout)
 
         
     def forward(self, input: torch.Tensor, mask: torch.Tensor=None) -> torch.Tensor:
@@ -57,7 +96,7 @@ class MultiHeadAttentionV2(torch.nn.Module):
         
         sdp_out: torch.Tensor = self.attn_dropout(scaled_dot_product).softmax(dim=-1) @ v # (B, n_h, n_seq, d_h)
 
-        return self.out_linear(sdp_out.transpose(1,2).view(B,n_seq, C))
+        return self.out_dropout(self.out_linear(sdp_out.transpose(1,2).view(B,n_seq, C)))
 
 
 
@@ -121,7 +160,7 @@ class Transformer(torch.nn.Module):
     def __init__(self, n_head, d_model, device, dtype:torch.dtype=torch.float32,dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.input_norm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
-        self.mha = MultiHeadAttentionV1(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
+        self.mha = MultiHeadAttentionV3(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype, dropout=dropout)
         self.residual_dropout = torch.nn.Dropout(dropout)
@@ -160,12 +199,16 @@ class ToyGPT(L.LightningModule):
         self.betas = betas
         self.eps = eps
         self.decay = weight_decay
-        self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id, device=device, dtype=dtype)
+        self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
+        self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id) 
+        # I referred to the nanoGPT of Karpathy about weight tying. embedding layer that convert token IDs to dense vector and the linear layer followed by softmax at the output of language model has directly reversed functionality to each other.
+        # benefit of weight tying
+        self.embedding.weight = self.output_linear.weight 
+
 
         self.pos_embedding = positional_embedding(d_model=n_embed, max_length=block_size, device=device, dtype=dtype).unsqueeze(0)
         self.embedding_dropout = torch.nn.Dropout(dropout)
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
-        self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
         self.apply(self._init_weights)
 
