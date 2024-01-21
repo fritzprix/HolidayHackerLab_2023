@@ -80,6 +80,12 @@ def train(args):
         })
 
     if args.wnb:
+        wandb.login()
+        wandb.init(project="toygpt", config={
+            "batch_size": args.batch,
+            "learning_rate": args.lr,
+            **config
+        })
         logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
     else:
         logger = TensorBoardLogger('tf_logs')
@@ -128,22 +134,29 @@ def process(args):
 
 
 def resume(args):
-    if args.wnb:
-        logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
-    else:
-        logger = TensorBoardLogger('tf_logs')
+
     tokenizer = get_tokenizer()
     device = get_device()
     last_ckpt_name = get_last_file('checkpoints')
+    step_offset = get_steps(last_ckpt_name)
     model = ToyGPT.load_from_checkpoint(last_ckpt_name, device=device)
     
-    print(model.hparams)
-    step_offset = get_steps(last_ckpt_name)
     batch_size = model.hparams['batch']
     block_size = model.hparams['block_size']
+    if args.wnb:
+        wandb.login()
+        wandb.init(project="toygpt", config={
+            "step_offse": step_offset,
+            **model.hparams
+        })
+        logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
+    else:
+        logger = TensorBoardLogger('tf_logs')
+    print(model.hparams)
+
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename="fmodel-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2)
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2)
     ],val_check_interval=2000, logger=logger)
     
     
@@ -160,8 +173,16 @@ def resume(args):
                                               num_proc=15, 
                                               train_size=0.99)
     trainer.fit(model, data_module)
+    if args.wnb:
+        wandb.finish()
     
-    
+def apply_repeat_penalty(logits:torch.Tensor, input_ids, penalty_factor):
+    new_ids = logits.argmax(dim=-1)
+    for i, (new_id, seq) in enumerate(zip(new_ids, input_ids)):
+        if new_id in seq:
+            logits[i, new_id] *= penalty_factor
+    return logits
+
     
 def generate(args):
     device = get_device()
@@ -177,13 +198,16 @@ def generate(args):
     input = tokenizer(prompt, return_attention_mask=True, return_tensors="pt").to(device)
 
     for _ in range(300):
-        output = model(input)  # Assuming the model returns logits
-        next_token_id = torch.argmax(output, dim=-1).item()  # Get the most probable next token ID
+        input_ids = input["input_ids"]
+        logits = model(input)  # Assuming the model returns logits
+        if args.repeat_penalty:
+            logits = apply_repeat_penalty(logits=logits, input_ids=input_ids, penalty_factor=1/pow(10, args.repeat_penalty))
+        next_token_id = torch.argmax(logits, dim=-1).item()  # Get the most probable next token ID
 
         if next_token_id == tokenizer.eos_token_id:
             break
 
-        input_ids = input["input_ids"]
+        
         new_input_ids = torch.cat((input_ids, torch.tensor([[next_token_id]], device=device)), dim=1)
         new_attention_mask = torch.ones((1, new_input_ids.shape[-1]), device=device)
 
@@ -217,6 +241,7 @@ if __name__ == '__main__':
     generate_parser = sub_parser.add_parser("generate", help='generate text using model')
     generate_parser.add_argument('-p', '--prompt', type=str, required=True)
     generate_parser.add_argument('-m', '--model', type=str, default=None)
+    generate_parser.add_argument('-r', '--repeat_penalty', type=float, default=1.3)
     generate_parser.set_defaults(func=generate)
 
     process_parser = sub_parser.add_parser('preprocess', help='preprocess')
