@@ -46,6 +46,12 @@ For an in-depth look at the training process, experiment setups, and results, vi
 - **Wikimedia/Wikisource:** A comprehensive collection of texts from Wikisource, specifically the `20231201.en` subset, providing a wide range of literary and historical texts.
 - **Togethercomputer/RedPajama-Data-1T-Sample:** A curated dataset from Togethercomputer, representing a diverse sample of text data.
 
+|split|token count|
+|-|-|
+|training| 1.500872004 billion|
+|validation| 0.01516361 billion|
+|test | 0.015308814 billion|
+
 ### Note
 
 This project is currently limited to the small model due to compute resource constraints. Plans for expanding to medium and large models are in place, contingent on resource availability.
