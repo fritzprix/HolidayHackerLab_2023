@@ -50,11 +50,19 @@ def get_dtype(precision) -> torch.dtype:
         return torch.float
 
 
-def get_steps(model_name:str) -> int:
-    step_number = re.search(r"step=(\d+)", model_name)
-    step_number = int(step_number.group(1)) if step_number else None
-    return step_number
-    
+def get_steps(model_name: str) -> int:
+    # Extract the offset value
+    offset_match = re.search(r"offset=(\d+)", model_name)
+    offset = int(offset_match.group(1)) if offset_match else 0  # Default to 0 if not found
+
+    # Extract the step number
+    step_match = re.search(r"step=(\d+)", model_name)
+    step = int(step_match.group(1)) if step_match else 0  # Default to 0 if not found
+
+    # Calculate the total offset
+    total_offset = offset + step
+    return total_offset
+
 def train(args):
     device = get_device()
     print(f"training will be performed on {device}")
@@ -78,7 +86,7 @@ def train(args):
     # 
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{step}-{val_loss:.3f}', save_top_k=2)
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2)
     ],val_check_interval=2000, logger=logger)
 
     
@@ -129,16 +137,18 @@ def resume(args):
     torch.set_float32_matmul_precision("medium")
     last_ckpt_name = get_last_file('checkpoints')
     model = ToyGPT.load_from_checkpoint(last_ckpt_name, device=device)
+    
     print(model.hparams)
+    step_offset = get_steps(last_ckpt_name)
     batch_size = model.hparams['batch']
     block_size = model.hparams['block_size']
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{step}-{val_loss:.3f}', save_top_k=2)
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename="fmodel-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2)
     ],val_check_interval=2000, logger=logger)
     
-    steps = get_steps(last_ckpt_name)
-    print(f"resusmed state : {last_ckpt_name}  (steps: {steps})")
+    
+    print(f"resusmed state : {last_ckpt_name}  (steps: {step_offset})")
     print(f"hparam: \n {model.hparams})")
     data_module = HuggingFaceCollectionModule(tokenizer, paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
                                               subsets=[
@@ -147,7 +157,7 @@ def resume(args):
                                               ],
                                               max_length=block_size, 
                                               batch_size=batch_size, 
-                                              resume_pos=steps,
+                                              resume_pos=step_offset,
                                               num_proc=15, 
                                               train_size=0.99)
     trainer.fit(model, data_module)
@@ -157,7 +167,11 @@ def resume(args):
 def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
-    model = ToyGPT.load_from_checkpoint('checkpoints/model-v8.ckpt').to(device)
+    if args.model is None:
+        model_checkpoint = get_last_file('checkpoints')
+    else:
+        model_checkpoint = args.model
+    model = ToyGPT.load_from_checkpoint(model_checkpoint, device=device)
     model.eval()
 
     prompt = f"{tokenizer.bos_token}{args.prompt}"
@@ -203,6 +217,7 @@ if __name__ == '__main__':
 
     generate_parser = sub_parser.add_parser("generate", help='generate text using model')
     generate_parser.add_argument('-p', '--prompt', type=str, required=True)
+    generate_parser.add_argument('-m', '--model', type=str, default=None)
     generate_parser.set_defaults(func=generate)
 
     process_parser = sub_parser.add_parser('preprocess', help='preprocess')

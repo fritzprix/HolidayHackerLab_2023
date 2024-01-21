@@ -333,6 +333,9 @@ class RedPajamaDataModule(L.LightningDataModule):
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
+        l = len(train_dataset)
+        print(range(self.batch_size * self.resume_pos, l))
+        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
         return data.DataLoader(train_dataset.with_format(type="torch").to_iterable_dataset().skip(self.batch_size * self.resume_pos), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
@@ -429,7 +432,7 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
         l = len(train_dataset)
         print(range(self.batch_size * self.resume_pos, l))
         train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
-        return data.DataLoader(train_dataset.with_format(type="torch").to_iterable_dataset().skip(self.batch_size * self.resume_pos), num_workers=self.num_proc, batch_size=self.batch_size)
+        return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
         val_dataset:Dataset = self.val_dataset.map(self._tokenize, batched=True,  batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
@@ -439,8 +442,6 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
         test_dataset = self.dataset["test"].map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
         return data.DataLoader(test_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
-
-
 
 
 class HuggingFaceCollectionModule(L.LightningDataModule):
@@ -530,7 +531,9 @@ class HuggingFaceCollectionModule(L.LightningDataModule):
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
-        init_pos = self.batch_size * self.resume_pos
+        l = len(train_dataset)
+        print(range(self.batch_size * self.resume_pos, l))
+        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
         return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     #.skip(self.batch_size * self.resume_pos)
