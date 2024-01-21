@@ -161,6 +161,7 @@ class WikiSourceDataModule(L.LightningDataModule):
                  clear_cache:bool=False,
                  languages:List[str]=['en'], 
                  train_size:float=0.9,
+                 resume_pos = 0,
                  num_proc=15) -> None:
         super().__init__()
         self.name = 'wikisource'
@@ -171,6 +172,7 @@ class WikiSourceDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_proc = num_proc
         self.clear_cache = clear_cache
+        self.resume_pos = resume_pos
         self.dataset = None
         self.val_dataset = None
         self.train_dataset = None
@@ -234,6 +236,7 @@ class WikiSourceDataModule(L.LightningDataModule):
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
+        train_dataset = train_dataset[self.batch_size * self.resume_pos:]
         return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
@@ -255,6 +258,7 @@ class RedPajamaDataModule(L.LightningDataModule):
                  clear_cache:bool=False,
                  subsets:List[str]=['book'], 
                  train_size:float=0.9,
+                 resume_pos = 0,
                  num_proc=15) -> None:
         super().__init__()
         self.name = 'redpajama-1T'
@@ -263,6 +267,7 @@ class RedPajamaDataModule(L.LightningDataModule):
         self.max_length = max_length
         self.train_size = train_size
         self.batch_size = batch_size
+        self.resume_pos = resume_pos
         self.num_proc = num_proc
         self.clear_cache = clear_cache
         self.dataset = None
@@ -324,11 +329,14 @@ class RedPajamaDataModule(L.LightningDataModule):
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         if os.path.exists(self.local_tokenized_cache_path):
-            train_dataset = load_dataset(self.local_tokenized_cache_path)
+            train_dataset = load_from_disk(self.local_tokenized_cache_path)
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
-        return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
+        l = len(train_dataset)
+        print(range(self.batch_size * self.resume_pos, l))
+        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
+        return data.DataLoader(train_dataset.with_format(type="torch").to_iterable_dataset().skip(self.batch_size * self.resume_pos), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
         val_dataset:Dataset = self.val_dataset.map(self._tokenize, batched=True,  batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
@@ -348,6 +356,7 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
                  batch_size:int,
                  clear_cache:bool=False,
                  train_size:float=0.9,
+                 resume_pos = 0,
                  num_proc=15) -> None:
         super().__init__()
         self.name = 'redpajama-1T-sample'
@@ -357,6 +366,7 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_proc = num_proc
         self.clear_cache = clear_cache
+        self.resume_pos = resume_pos
         self.dataset = None
         self.val_dataset = None
         self.train_dataset = None
@@ -415,10 +425,13 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         if os.path.exists(self.local_tokenized_cache_path):
-            train_dataset = load_dataset(self.local_tokenized_cache_path)
+            train_dataset = load_from_disk(self.local_tokenized_cache_path)
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
+        l = len(train_dataset)
+        print(range(self.batch_size * self.resume_pos, l))
+        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
         return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
     def val_dataloader(self) -> EVAL_DATALOADERS:
@@ -431,8 +444,6 @@ class RedPajamaDataSampleModule(L.LightningDataModule):
     
 
 
-
-
 class HuggingFaceCollectionModule(L.LightningDataModule):
 
     def __init__(self, tokenizer: PreTrainedTokenizer, 
@@ -442,6 +453,7 @@ class HuggingFaceCollectionModule(L.LightningDataModule):
                  batch_size:int,
                  clear_cache:bool=False,
                  train_size:float=0.9,
+                 resume_pos = 0,
                  num_proc=15) -> None:
         super().__init__()
         self.name = '_'.join(paths)
@@ -453,6 +465,7 @@ class HuggingFaceCollectionModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_proc = num_proc
         self.clear_cache = clear_cache
+        self.resume_pos = resume_pos
         self.dataset = None
         self.val_dataset = None
         self.train_dataset = None
@@ -514,12 +527,16 @@ class HuggingFaceCollectionModule(L.LightningDataModule):
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         if os.path.exists(self.local_tokenized_cache_path):
-            train_dataset = load_dataset(self.local_tokenized_cache_path)
+            train_dataset = load_from_disk(self.local_tokenized_cache_path)
         else:
             train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
             train_dataset.save_to_disk(self.local_tokenized_cache_path)
+        l = len(train_dataset)
+        print(range(self.batch_size * self.resume_pos, l))
+        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l))
         return data.DataLoader(train_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)
     
+    #.skip(self.batch_size * self.resume_pos)
     def val_dataloader(self) -> EVAL_DATALOADERS:
         val_dataset:Dataset = self.val_dataset.map(self._tokenize, batched=True,  batch_size=self.batch_size).select_columns(["input_ids", "attention_mask"])
         return data.DataLoader(val_dataset.with_format(type="torch"), num_workers=self.num_proc, batch_size=self.batch_size)

@@ -2,6 +2,7 @@ from typing import Any
 import json
 import argparse
 import torch
+import re
 from model import ToyGPT
 from data import WikiSourceDataModule, RedPajamaDataModule, RedPajamaDataSampleModule, HuggingFaceCollectionModule
 from transformers import GPT2Tokenizer,PreTrainedTokenizer
@@ -12,6 +13,14 @@ from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 import wandb
 import os
 
+
+def get_last_file(dir_path: str) -> str:
+    files = [os.path.join(dir_path,fname) for fname in os.listdir(dir_path)]
+    files.sort(key=lambda x: os.path.getatime(x), reverse=True)
+    if files:
+        return files[0]
+    else:
+        return None
 
 def get_tokenizer() -> PreTrainedTokenizer:
     
@@ -40,12 +49,26 @@ def get_dtype(precision) -> torch.dtype:
     if precision == '32-true':
         return torch.float
 
-    
+
+def get_steps(model_name: str) -> int:
+    # Extract the offset value
+    offset_match = re.search(r"offset=(\d+)", model_name)
+    offset = int(offset_match.group(1)) if offset_match else 0  # Default to 0 if not found
+
+    # Extract the step number
+    step_match = re.search(r"step=(\d+)", model_name)
+    step = int(step_match.group(1)) if step_match else 0  # Default to 0 if not found
+
+    # Calculate the total offset
+    total_offset = offset + step
+    return total_offset
+
 def train(args):
     device = get_device()
     print(f"training will be performed on {device}")
-    config = get_config(args.config)
-    torch.set_float32_matmul_precision('high')
+    configs = get_config(args.config)
+    config = configs[0]
+
 
     # initialize wandb
     if args.wnb:
@@ -63,7 +86,7 @@ def train(args):
     # 
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-{step}-{val_loss:.3f}', save_top_k=2)
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2)
     ],val_check_interval=2000, logger=logger)
 
     
@@ -81,23 +104,10 @@ def train(args):
                                               num_proc=15, 
                                               train_size=0.99)
     
-    # data_module = RedPajamaDataSampleModule(get_tokenizer(), 
-    #                                        max_length=config['block_size'], 
-    #                                        batch_size=args.batch, 
-    #                                        num_proc=15, 
-    #                                        train_size=0.99)
-
-    # data_module = WikiSourceDataModule(get_tokenizer(), 
-    #                                        languages=['en'], 
-    #                                        max_length=config['block_size'], 
-    #                                        batch_size=args.batch, 
-    #                                        num_proc=15, 
-    #                                        train_size=0.99)
-    
     dtype = get_dtype(args.precision)
     
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
-    model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, dtype=dtype, device=device, dropout=0.1, weight_decay=args.wd, lr=args.lr, **config)
+    model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, dtype=dtype, device=device, p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, **config)
     
     trainer.fit(model, data_module)
     if args.wnb:
@@ -118,29 +128,50 @@ def process(args):
 
 
 def resume(args):
-    ckpts = os.listdir('checkpoints')
-    if not ckpts:
-        print("No checkpoints found to resume from.")
-        return
-
-    # Optional: allow specifying a particular checkpoint
-    ckpt_file = args.ckpt if args.ckpt else max([f"checkpoints/{ckpt}" for ckpt in ckpts], key=os.path.getmtime)
-
-    # Load the checkpoint
-    checkpoint_path = ckpt_file
-    if not os.path.exists(checkpoint_path):
-        print(f"Checkpoint file {checkpoint_path} does not exist.")
-        return
+    if args.wnb:
+        logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
+    else:
+        logger = TensorBoardLogger('tf_logs')
+    tokenizer = get_tokenizer()
+    device = get_device()
+    torch.set_float32_matmul_precision("medium")
+    last_ckpt_name = get_last_file('checkpoints')
+    model = ToyGPT.load_from_checkpoint(last_ckpt_name, device=device)
     
-    model = ToyGPT.load_from_checkpoint(checkpoint_path=f"{checkpoint_path}")
-    model
-
-
+    print(model.hparams)
+    step_offset = get_steps(last_ckpt_name)
+    batch_size = model.hparams['batch']
+    block_size = model.hparams['block_size']
+    trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
+        EarlyStopping(monitor='val_loss', mode='min', patience=10),
+        ModelCheckpoint('checkpoints', monitor='val_loss', mode='min',filename="fmodel-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2)
+    ],val_check_interval=2000, logger=logger)
+    
+    
+    print(f"resusmed state : {last_ckpt_name}  (steps: {step_offset})")
+    print(f"hparam: \n {model.hparams})")
+    data_module = HuggingFaceCollectionModule(tokenizer, paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
+                                              subsets=[
+                                                  ['20231201.en'],
+                                                  [None]
+                                              ],
+                                              max_length=block_size, 
+                                              batch_size=batch_size, 
+                                              resume_pos=step_offset,
+                                              num_proc=15, 
+                                              train_size=0.99)
+    trainer.fit(model, data_module)
+    
+    
     
 def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
-    model = ToyGPT.load_from_checkpoint('checkpoints/model-v8.ckpt').to(device)
+    if args.model is None:
+        model_checkpoint = get_last_file('checkpoints')
+    else:
+        model_checkpoint = args.model
+    model = ToyGPT.load_from_checkpoint(model_checkpoint, device=device)
     model.eval()
 
     prompt = f"{tokenizer.bos_token}{args.prompt}"
@@ -179,10 +210,14 @@ if __name__ == '__main__':
 
     resume_parser = sub_parser.add_parser('resume', help='resume training')
     resume_parser.add_argument('-i', '--ckpt', required=False, default=None)
+    resume_parser.add_argument('-c', '--config', type=str, default='config.json', help='configuration file for training')
+    resume_parser.add_argument('-w', '--wnb', type=bool, default=False, help='wandb logging')
+    resume_parser.add_argument('-p', '--precision', type=str, default='32-true', help='training precision option')
     resume_parser.set_defaults(func=resume)
 
     generate_parser = sub_parser.add_parser("generate", help='generate text using model')
     generate_parser.add_argument('-p', '--prompt', type=str, required=True)
+    generate_parser.add_argument('-m', '--model', type=str, default=None)
     generate_parser.set_defaults(func=generate)
 
     process_parser = sub_parser.add_parser('preprocess', help='preprocess')
