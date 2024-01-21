@@ -7,7 +7,6 @@ Almost 3 years have passed since the 'transformer' paper was published by Google
 
 Creating a production-ready transformer model involves numerous complexities, but my goal is to simplify the process for educational purposes. I aim to design it in such a way that even those new to Python, including my future self, can easily understand its inner workings.
 
-- No Sampling, Just Greedy
 
 ## Model Architecture
 
@@ -26,6 +25,10 @@ Creating a production-ready transformer model involves numerous complexities, bu
 ## Tokenization
 
 - **Tokenizer Used:** GPT2Tokenizer from Hugging Face. This choice was made for convenience and to ensure compatibility with widely used standards in NLP.
+
+## Generation
+
+- No Sampling, Just Greedy
 
 ## Training and Experimentation Details
 
