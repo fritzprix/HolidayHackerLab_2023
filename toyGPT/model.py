@@ -1,4 +1,5 @@
 from typing import Any, Tuple, Dict
+from pydantic import BaseModel
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 import torch
 import math
@@ -184,16 +185,31 @@ def positional_embedding(d_model, max_length, dtype=None, device=None):
         pe[:,1::2] = torch.cos(pos / div_odd)
         return pe.requires_grad_(False)
 
+
+class ToyGPTModelConfig(BaseModel):
+    name: str = 'toygpt'
+    n_layer: int = 12
+    n_head: int = 8
+    block_size: int = 512
+    n_embed:int = 768
+
 class ToyGPT(L.LightningModule):
 
-    def __init__(self, 
+    def __init__(self,
                  vocab_size:int, 
                  block_size:int,
-                 n_embed:int, n_head:int, n_layer:int, pad_id:int=None,  device=None, 
-                 dtype:torch.dtype=torch.float32, dropout:float=0.1, lr=2.5e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, name: str='toygpt', *args, **kwargs) -> None:
+                 batch:int,
+                 name: str,
+                 n_embed:int, n_head:int, n_layer:int, pad_id:int=None, 
+                 device=None, 
+                 dtype:torch.dtype=torch.float32, 
+                 p_dropout:float=0.1, 
+                 lr=2.5e-4, betas=(0.9, 0.999), 
+                 eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
         
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(ignore=['dtype', 'device'])
+        self.batch = batch
         self.name = name
         self.lr = lr
         self.betas = betas
@@ -207,8 +223,8 @@ class ToyGPT(L.LightningModule):
 
 
         self.pos_embedding = positional_embedding(d_model=n_embed, max_length=block_size, device=device, dtype=dtype).unsqueeze(0)
-        self.embedding_dropout = torch.nn.Dropout(dropout)
-        self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=dropout) for _ in range(n_layer)])
+        self.embedding_dropout = torch.nn.Dropout(p_dropout)
+        self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=p_dropout) for _ in range(n_layer)])
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
         self.apply(self._init_weights)
 
