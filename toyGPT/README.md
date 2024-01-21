@@ -7,7 +7,6 @@ Almost 3 years have passed since the 'transformer' paper was published by Google
 
 Creating a production-ready transformer model involves numerous complexities, but my goal is to simplify the process for educational purposes. I aim to design it in such a way that even those new to Python, including my future self, can easily understand its inner workings.
 
-- No Sampling, Just Greedy
 
 ## Model Architecture
 
@@ -27,6 +26,10 @@ Creating a production-ready transformer model involves numerous complexities, bu
 
 - **Tokenizer Used:** GPT2Tokenizer from Hugging Face. This choice was made for convenience and to ensure compatibility with widely used standards in NLP.
 
+## Generation
+
+- No Sampling, Just Greedy
+
 ## Training and Experimentation Details
 
 For an in-depth look at the training process, experiment setups, and results, visit our project page on Weights & Biases:
@@ -42,6 +45,12 @@ For an in-depth look at the training process, experiment setups, and results, vi
 
 - **Wikimedia/Wikisource:** A comprehensive collection of texts from Wikisource, specifically the `20231201.en` subset, providing a wide range of literary and historical texts.
 - **Togethercomputer/RedPajama-Data-1T-Sample:** A curated dataset from Togethercomputer, representing a diverse sample of text data.
+
+|split|token count|
+|-|-|
+|training| 1.500872004 billion|
+|validation| 0.01516361 billion|
+|test | 0.015308814 billion|
 
 ### Note
 

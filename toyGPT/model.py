@@ -5,22 +5,25 @@ import torch
 import math
 import lightning as L
 
+# ScaledDotProductAttention is a fundamental component in Transformer architecture.
+# It computes attention weights and produces a weighted average of values (v).
 class ScaledDotProductAttention(torch.nn.Module):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
     
+    # q: query, k: key, v: value, mask: optional mask to exclude certain positions from attention
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        # input should have (B,N,d_model) where B is batch size, N is length of sequence, d_model is the dimension of word embedding vector
-        # q (B,N,d_model) , k (B,N,d_model)
-        # qk = (B,N,N)
-        scaled_qk: torch.Tensor = q@k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
-        # mask should be tensor of bool (B,N,N)
+        # Calculate the dot product of q and k, then scale it by the square root of the dimensionality of the keys.
+        scaled_qk: torch.Tensor = q @ k.transpose(2, 1) * (1 / math.sqrt(k.size(-1)))
+        
+        # If a mask is provided (e.g., for padding or future blinding), apply it to the scaled dot product.
         if mask is not None:
             scaled_qk = scaled_qk.masked_fill(mask.bitwise_not(), float('-inf'))
+        
+        # Apply softmax to get the attention weights, then multiply with the values.
         attention_weights = torch.softmax(scaled_qk, dim=-1)
-        return  attention_weights @  v
-
+        return attention_weights @ v
 
 class MultiHeadAttentionV3(torch.nn.Module):
 
@@ -151,25 +154,37 @@ class PositionWiseFeedforward(torch.nn.Module):
         return self.pwff.forward(input)
 
 
+# The Transformer class defines a single Transformer block, which is composed of a multi-head attention layer
+# followed by a position-wise feedforward network.
 class Transformer(torch.nn.Module):
-
+    # Initialization of the Transformer block with normalization layers, multi-head attention, and feedforward network.
     def __init__(self, n_head, d_model, device, dtype:torch.dtype=torch.float32,dropout:float=0.2, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # Normalization layer applied to the input.
         self.input_norm = torch.nn.LayerNorm(d_model, device=device, dtype=dtype)
+        # Multi-head attention layer.
         self.mha = MultiHeadAttentionV3(d_model=d_model, n_head=n_head, device=device, dtype=dtype, dropout=dropout)
+        # Normalization layer applied after the attention layer.
         self.mha_lnorm = torch.nn.LayerNorm(d_model, device=device,dtype=dtype)
+        # Position-wise feedforward network.
         self.pw_ff = PositionWiseFeedforward(d_model=d_model, device=device, dtype=dtype, dropout=dropout)
+        # Dropout layer for the residual connections.
         self.residual_dropout = torch.nn.Dropout(dropout)
 
+    # The forward method defines how the input data flows through the Transformer block.
     def forward(self, data:Tuple[torch.Tensor]) -> torch.Tensor:
-        # Pre-LayerNormalization from GPT-3, (note: Post-LayerNormalization is used for GPT-2 and original paper)
+        # Split the input tuple into the input tensor and the attention mask.
         input, attention_mask = data
 
+        # Apply layer normalization.
         norm_input = self.input_norm.forward(input)
+        # Compute the output of the multi-head attention layer, adding the input for residual connection.
         mha_output = self.residual_dropout(input) + self.mha.forward(norm_input, attention_mask)
+        # Apply normalization to the output of the attention layer.
         norm_mha_output = self.mha_lnorm(mha_output)
+        # Return the output of the feedforward network, again adding the input for residual connection, along with the attention mask.
         return (mha_output + self.pw_ff.forward(norm_mha_output), attention_mask)
-    
+
 
 def positional_embedding(d_model, max_length, dtype=None, device=None):
         div_even = torch.pow(10000, torch.arange(0, d_model // 2, dtype=dtype, device=device) * 2 / d_model)
@@ -218,42 +233,32 @@ class ToyGPTModelConfig(BaseModel):
     block_size: int = 512
     n_embed:int = 768
 
+# The ToyGPT class defines the complete model architecture by stacking multiple Transformer blocks and adding the necessary components for language modeling.
 class ToyGPT(L.LightningModule):
-
-    def __init__(self,
-                 vocab_size:int, 
-                 block_size:int,
-                 batch:int,
-                 name: str,
-                 n_embed:int, n_head:int, n_layer:int, pad_id:int=None, 
-                 device=None, 
-                 dtype:torch.dtype=torch.float32, 
-                 p_dropout:float=0.1, 
-                 lr=2.5e-4, betas=(0.9, 0.999), 
-                 eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
-        
+    # Initialization of the ToyGPT model with parameters like vocabulary size, block size, etc.
+    def __init__(self, vocab_size:int, block_size:int, batch:int, name: str, n_embed:int, n_head:int, n_layer:int, pad_id:int=None, device=None, dtype:torch.dtype=torch.float32, p_dropout:float=0.1, lr=2.5e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # Save hyperparameters for easy access and checkpointing.
         self.save_hyperparameters(ignore=['dtype', 'device'])
-        self.batch = batch
         self.name = name
-        self.lr = lr
-        self.betas = betas
-        self.eps = eps
-        self.decay = weight_decay
+        self.batch = batch
+        # Define the linear layer for mapping the output of the transformers to the vocabulary size.
         self.output_linear = torch.nn.Linear(n_embed, vocab_size, device=device, dtype=dtype)
+        # Define the embedding layer for converting token IDs to dense vectors.
         self.embedding = torch.nn.Embedding(vocab_size, n_embed, padding_idx=pad_id) 
-        # I referred to the nanoGPT of Karpathy about weight tying. embedding layer that convert token IDs to dense vector and the linear layer followed by softmax at the output of language model has directly reversed functionality to each other.
-        # benefit of weight tying
+        # Tying the weights of the output linear layer and the embedding layer.
         self.embedding.weight = self.output_linear.weight 
-
-
+        # Define the positional embeddings for the model.
         self.pos_embedding = positional_embedding(d_model=n_embed, max_length=block_size, device=device, dtype=dtype).unsqueeze(0)
+        # Define the dropout layer for embeddings.
         self.embedding_dropout = torch.nn.Dropout(p_dropout)
+        # Stack the Transformer blocks to create the model.
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=p_dropout) for _ in range(n_layer)])
+        # Define the loss function, ignoring the padding index in the loss calculation.
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
+        # Initialize the weights of the model.
         self.apply(self._init_weights)
 
-    
     
 
     def _init_weights(self, module):

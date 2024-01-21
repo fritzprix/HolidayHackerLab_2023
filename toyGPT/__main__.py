@@ -134,7 +134,6 @@ def resume(args):
         logger = TensorBoardLogger('tf_logs')
     tokenizer = get_tokenizer()
     device = get_device()
-    torch.set_float32_matmul_precision("medium")
     last_ckpt_name = get_last_file('checkpoints')
     model = ToyGPT.load_from_checkpoint(last_ckpt_name, device=device)
     
