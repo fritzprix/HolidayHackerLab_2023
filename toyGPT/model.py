@@ -236,7 +236,9 @@ class ToyGPTModelConfig(BaseModel):
 # The ToyGPT class defines the complete model architecture by stacking multiple Transformer blocks and adding the necessary components for language modeling.
 class ToyGPT(L.LightningModule):
     # Initialization of the ToyGPT model with parameters like vocabulary size, block size, etc.
-    def __init__(self, vocab_size:int, block_size:int, batch:int, name: str, n_embed:int, n_head:int, n_layer:int, pad_id:int=None, device=None, dtype:torch.dtype=torch.float32, p_dropout:float=0.1, lr=2.5e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
+    def __init__(self, vocab_size:int, block_size:int, batch:int, name: str, n_embed:int, n_head:int,
+                  n_layer:int, pad_id:int=None, device=None, dtype:torch.dtype=torch.float32, p_dropout:float=0.1, lr=2.5e-4,
+                  betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Save hyperparameters for easy access and checkpointing.
         self.save_hyperparameters(ignore=['dtype', 'device'])
@@ -256,10 +258,13 @@ class ToyGPT(L.LightningModule):
         self.transformers = torch.nn.Sequential(*[Transformer(n_head=n_head, d_model=n_embed, device=device, dtype=dtype, dropout=p_dropout) for _ in range(n_layer)])
         # Define the loss function, ignoring the padding index in the loss calculation.
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
+        self.lr = lr
+        self.eps = eps
+        self.betas = betas
+        self.decay = weight_decay
         # Initialize the weights of the model.
         self.apply(self._init_weights)
 
-    
 
     def _init_weights(self, module):
         if isinstance(module, torch.nn.Linear):
