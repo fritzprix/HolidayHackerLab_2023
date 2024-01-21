@@ -1,7 +1,7 @@
 
-# Building GPT from Scratch
+# toyGPT - A Hands-On Project in Building a Basic GPT Model
 
-Almost 3 years have passed since the 'transformer' paper was published by Google researchers, marking a remarkable milestone in technology. Today, large language models, epitomized by services like ChatGPT, are ubiquitous in our daily lives. Although I'm no longer an active developer, understanding the basic building blocks of these achievements seems essential for my role as a tech investment manager. Therefore, to enhance my understanding, I've decided to build a small GPT model from scratch as a learning experience.
+Almost 7 years have passed since the [Transformer paper](https://arxiv.org/abs/1706.03762) was published by Google researchers, marking a remarkable milestone in technology. Today, large language models, epitomized by services like ChatGPT, are ubiquitous in our daily lives. Although I'm no longer an active developer, understanding the basic building blocks of these achievements seems essential for my role as a tech investment manager. Therefore, to enhance my understanding, I've decided to build a small GPT model from scratch as a learning experience.
 
 ## Approach - Top Priority in Readability
 
@@ -10,11 +10,11 @@ Creating a production-ready transformer model involves numerous complexities, bu
 
 ## Model Architecture
 
-| Model Name     | Number of Layers | Number of Attention Heads | Block Size | Embedding Size |
-|----------------|------------------|---------------------------|------------|----------------|
-| toyGPT.small   | 12               | 8                         | 512        | 768            |
-| toyGPT.medium  | 16               | 8                         | 512        | 1024           |
-| toyGPT.large   | 24               | 16                        | 512        | 2048           |
+| Model Name     | Number of Layers | Number of Attention Heads | Block Size | Embedding Size | Parameter Count (Million) |
+|----------------|------------------|---------------------------|------------|----------------|---------------------------|
+| toyGPT.small   | 12               | 8                         | 512        | 768            | 123.70                    |
+| toyGPT.medium  | 16               | 8                         | 512        | 1024           | 253.06                    |
+| toyGPT.large   | 24               | 16                        | 512        | 2048           | 1311.58                   |
 
 ## Key Techniques and Tools
 
