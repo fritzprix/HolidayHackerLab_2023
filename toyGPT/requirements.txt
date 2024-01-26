@@ -1,5 +1,6 @@
 datasets
 lightning
+pydantic
 torch
 transformers
 unstructured
