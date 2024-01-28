@@ -4,6 +4,8 @@ import shutil
 
 import random
 from torch.nn.utils.rnn import pad_sequence
+from itertools import zip_longest
+
 
 import lightning as L
 from datasets import Dataset, load_from_disk, load_dataset
@@ -150,7 +152,6 @@ class SentenceChunker:
                 tokens_total = 0
             # Append the processed batches to the result
             result["success"].append([*success_batch_bucket])
-            assert len(result["success"]) < self.max_length
             if self.return_failure:
                 result["failure"].append([*failure_batch_bucket])
             success_batch_bucket.clear()
@@ -162,7 +163,7 @@ def generate_choices(list_of_indices:List[int], choice_fraction):
     # Shuffle the list to ensure randomness
     k = len(list_of_indices) * choice_fraction
     if k < 1:
-        raise ValueError("Choice fraction too small to create any set.")
+        return None
     list_of_indices = set(list_of_indices)
 
     k = int(k)
@@ -195,11 +196,14 @@ class MLMAugmentation:
                     poplulation = torch.nonzero(input_ids.squeeze() != self.sep_token_id).squeeze().tolist()
                     poplulation.remove(0)
                     choices = generate_choices(poplulation, self.masking_fraction)
+                    if choices is None:
+                        continue
                     label:torch.Tensor = input_ids.clone().squeeze(0)
                     input_ids = input_ids.expand((len(choices), input_ids.size(-1)))
                     for i in range(len(choices)):
                         input_ids[i, list(choices[i])] = self.tokenizer.mask_token_id
-                        yield {"input": input_ids[i], "label": label}
+                        result = {"input": input_ids[i], "label": label}
+                        yield result
     
 class CLMAugmentation:
 
@@ -223,7 +227,7 @@ class CLMAugmentation:
 
 
 
-class HuggingFaceCollectionModuleV1(L.LightningDataModule):
+class HFCollectionDataModule(L.LightningDataModule):
 
     def __init__(self, tokenizer: PreTrainedTokenizer, 
                  paths:List[str],
@@ -234,7 +238,6 @@ class HuggingFaceCollectionModuleV1(L.LightningDataModule):
                  pretrain_type:str='CLM',
                  clear_cache:bool=False,
                  train_size:float=0.9,
-                 resume_pos = 0,
                  num_proc=15) -> None:
         super().__init__()
 
@@ -248,7 +251,6 @@ class HuggingFaceCollectionModuleV1(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_proc = num_proc
         self.clear_cache = clear_cache
-        self.resume_pos = resume_pos
         self.dataset = None
         self.val_dataset = None
         self.train_dataset = None
@@ -332,10 +334,7 @@ class HuggingFaceCollectionModuleV1(L.LightningDataModule):
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         train_dataset = self.train_dataset
-        l = len(train_dataset)
-        print(range(self.batch_size * self.resume_pos, l))
-        
-        train_dataset = train_dataset.select(range(self.batch_size * self.resume_pos, l)).select_columns(["input", "label"])
+        train_dataset = train_dataset.select_columns(["input", "label"])
         return data.DataLoader(train_dataset.with_format(type="torch"),  batch_size=self.batch_size, collate_fn=self._prepare_for_model)
     
     #.skip(self.batch_size * self.resume_pos)
@@ -346,5 +345,90 @@ class HuggingFaceCollectionModuleV1(L.LightningDataModule):
     def test_dataloader(self) -> EVAL_DATALOADERS:
         test_dataset = self.dataset["test"].select_columns(["input", "label"])
         return data.DataLoader(test_dataset.with_format(type="torch"),  batch_size=self.batch_size, collate_fn=self._prepare_for_model)
+    
+
+
+class BatchGenerator:
+    def __init__(self, loaders: List[data.DataLoader], keys: List[str]) -> None:
+        self.loaders = loaders
+        self.keys = keys
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        for batch_tuple in zip(*self.loaders):
+            yield {k:b  for b, k in zip(batch_tuple, self.keys)}
+
+
+
+def pad_and_expand_attention_mask(attention_masks, max_len):
+    # Create a new tensor for padded attention masks
+    batch_size = len(attention_masks)
+    padded_masks = torch.zeros(batch_size, max_len, max_len, dtype=torch.long)
+
+    # Copy each attention mask into the padded tensor
+    for i, mask in enumerate(attention_masks):
+        current_len = mask.size(1)
+        padded_masks[i, :current_len, :current_len] = mask
+
+    return padded_masks
+
+class DataModuleGroup(L.LightningDataModule):
+
+    def __init__(self, modules: List[L.LightningDataModule], keys: List[str], pad_token_id, batch_size:int) -> None:
+        super().__init__()
+        self.modules = modules
+        self.keys = keys
+        self.batch_size = batch_size
+        self.pad_token_id = pad_token_id
+
+    def prepare_data(self) -> None:
+        for module in self.modules:
+            module.prepare_data()
+        return super().prepare_data()
+    
+    def setup(self, stage: str) -> None:
+        for module in self.modules:
+            module.setup(stage)
+        return super().setup(stage)
+    
+    
+    def _batch_collator(self, batch):
+        sub_feature_names = ['input', 'target', 'attention_mask']
+        sub_feautre_padding_value = [self.pad_token_id, self.pad_token_id, None]
+        collated_batch = {key:{feature:[] for feature in sub_feature_names} for key in self.keys}
+        max_seq_n = 0
+
+        for item in batch:
+            for key in self.keys:
+                feature = item[key]
+                for sub_feature, pad_value in zip(sub_feature_names, sub_feautre_padding_value):
+                    if pad_value is not None:
+                        sub_feature_value = torch.tensor(feature[sub_feature]).view(-1)
+                        if max_seq_n < sub_feature_value.size(-1):
+                            max_seq_n = sub_feature_value.size(-1)
+                        collated_batch[key][sub_feature].append(sub_feature_value)
+                    else:
+                        collated_batch[key][sub_feature].append(torch.tensor(feature[sub_feature]))
+        for key in self.keys:
+            feature = collated_batch[key]
+            for sub_feature, pad_value in zip(sub_feature_names, sub_feautre_padding_value):
+                if pad_value is not None:
+                    collated_batch[key][sub_feature] = pad_sequence(feature[sub_feature], True, pad_value)
+                else:
+                    collated_batch[key][sub_feature] = pad_and_expand_attention_mask(feature[sub_feature], max_seq_n)
+        return collated_batch
+
+
+    
+    def train_dataloader(self) -> TRAIN_DATALOADERS:
+        return data.DataLoader(Dataset.from_generator(BatchGenerator([module.train_dataloader() for module in self.modules], self.keys)), 
+                               batch_size=self.batch_size, collate_fn=self._batch_collator, num_workers=15)
+    
+    def val_dataloader(self) -> EVAL_DATALOADERS:
+        return data.DataLoader(Dataset.from_generator(BatchGenerator([module.val_dataloader() for module in self.modules], self.keys)), 
+                               batch_size=self.batch_size, collate_fn=self._batch_collator, num_workers=15)
+    
+    def test_dataloader(self) -> EVAL_DATALOADERS:
+        return data.DataLoader(Dataset.from_generator(BatchGenerator([module.test_dataloader() for module in self.modules], self.keys)), 
+                               batch_size=self.batch_size, collate_fn=self._batch_collator, num_workers=15)
     
 

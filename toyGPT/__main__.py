@@ -3,8 +3,8 @@ import json
 import argparse
 import torch
 import re
-from model import ToyGPT,ToyGPTV0
-from data import HuggingFaceCollectionModuleV1
+from model import ToyGPT,ToyGPTMLM
+from data import HFCollectionDataModule, DataModuleGroup
 from transformers import GPT2TokenizerFast,PreTrainedTokenizer
 import lightning as L
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
@@ -102,7 +102,7 @@ def train(args):
     tokenizer: PreTrainedTokenizer = get_tokenizer()
     vocab_size = len(tokenizer)
 
-    data_module = HuggingFaceCollectionModuleV1(tokenizer, 
+    data_module = HFCollectionDataModule(tokenizer, 
                                               paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
                                               subsets=[
                                                   ['20231201.en'],
@@ -120,8 +120,73 @@ def train(args):
     dtype = get_dtype(args.precision)
     
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
-    model = ToyGPT(vocab_size=vocab_size, pad_id=tokenizer.pad_token_id, dtype=dtype, device=device, p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, **config)
+    model = ToyGPT(vocab_size=vocab_size, pad_token_id=tokenizer.pad_token_id, dtype=dtype, device=device, p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, **config)
     
+    trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
+        EarlyStopping(monitor='val_loss', mode='min', patience=10),
+        ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2)
+    ], val_check_interval=2000, logger=logger)
+
+    trainer.fit(model, data_module)
+    if args.wnb:
+        wandb.finish(0)
+
+
+
+def experiment(args):
+    device = get_device()
+    print(f"training will be performed on {device}")
+    configs = get_config(args.config)
+    config = configs[0]
+    torch.set_float32_matmul_precision('medium')
+
+    # initialize wandb
+    if args.wnb:
+        wandb.login()
+        wandb.init(project="toygpt", config={
+            "batch_size": args.batch,
+            "learning_rate": args.lr,
+            **config
+        })
+
+    if args.wnb:
+        wandb.login()
+        wandb.init(project="toygpt", config={
+            "batch_size": args.batch,
+            "learning_rate": args.lr,
+            **config
+        })
+        logger = WandbLogger(name='toygpt',version='0.1.0',log_model="all")
+    else:
+        logger = TensorBoardLogger('tf_logs')
+    
+
+    
+    tokenizer: PreTrainedTokenizer = get_tokenizer()
+    vocab_size = len(tokenizer)
+
+    clm_dataset = HFCollectionDataModule(tokenizer, 
+                                            paths=['yahma/alpaca-cleaned'], columns=["output"],
+                                            subsets=[[None]], max_length=config['block_size'], 
+                                            num_proc=(os.cpu_count() - 1),
+                                            batch_size=1, train_size=0.99)
+
+    mlm_dataset = HFCollectionDataModule(tokenizer, 
+                                            paths=['yahma/alpaca-cleaned'], columns=["output"],
+                                            pretrain_type='MLM',
+                                            subsets=[[None]], max_length=config['block_size'], 
+                                            num_proc=(os.cpu_count() - 1),
+                                            batch_size=1, train_size=0.99)
+    
+    data_module = DataModuleGroup([clm_dataset, mlm_dataset], ["clm", "mlm"], batch_size=args.batch, pad_token_id=tokenizer.pad_token_id)
+
+    
+    dtype = get_dtype(args.precision)
+    
+    print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
+    config['name'] = 'toygpt.mlm.small'
+    model = ToyGPTMLM(vocab_size=vocab_size, pad_token_id=tokenizer.pad_token_id, dtype=dtype, device=device, p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, **config)
+
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
         ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2)
@@ -134,7 +199,7 @@ def train(args):
 def process(args):
     config = get_config(args.config)
     tokenizer = get_tokenizer()
-    data_module = HuggingFaceCollectionModuleV1(tokenizer, 
+    data_module = HFCollectionDataModule(tokenizer, 
                                               paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
                                               subsets=[
                                                   ['20231201.en'],
@@ -177,14 +242,14 @@ def resume(args):
 
     trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2)
+        ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
     ],val_check_interval=2000, logger=logger)
     
     
     print(f"resusmed state : {last_ckpt_name}  (steps: {step_offset})")
     print(f"hparam: \n {model.hparams})")
 
-    data_module = HuggingFaceCollectionModuleV1(tokenizer, 
+    data_module = HFCollectionDataModule(tokenizer, 
                                               paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
                                               subsets=[
                                                   ['20231201.en'],
@@ -199,7 +264,7 @@ def resume(args):
                                               num_proc=15, 
                                               train_size=0.99)
     
-    trainer.fit(model, data_module, ckpt_path=f'checkpoints/{model.__class__.__name__}')
+    trainer.fit(model, data_module, ckpt_path='last')
     if args.wnb:
         wandb.finish()
     
@@ -257,6 +322,15 @@ if __name__ == '__main__':
     train_parser.add_argument('-d', '--wd', type=float, default=0.1, help='weight decay for Adam optimizer')
     train_parser.add_argument('-p', '--precision', type=str, default='32-true', help='training precision option')
     train_parser.add_argument('-w', '--wnb', type=bool, default=False, help='wandb logging')
+
+    exp_parser = sub_parser.add_parser('experiment', help='do some experiment')
+    exp_parser.set_defaults(func=experiment)
+    exp_parser.add_argument('-c', '--config', type=str, default='config.json', help='configuration file for training')
+    exp_parser.add_argument('-b', '--batch', type=int, default=4, help='batch_size for training')
+    exp_parser.add_argument('-r', '--lr', type=float, default=2.5e-4, help='learning rate')
+    exp_parser.add_argument('-d', '--wd', type=float, default=0.1, help='weight decay for Adam optimizer')
+    exp_parser.add_argument('-p', '--precision', type=str, default='32-true', help='training precision option')
+    exp_parser.add_argument('-w', '--wnb', type=bool, default=False, help='wandb logging')
 
     resume_parser = sub_parser.add_parser('resume', help='resume training')
     resume_parser.add_argument('-i', '--ckpt', required=False, default=None)

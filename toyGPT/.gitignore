@@ -166,3 +166,4 @@ tf_logs
 __pycache__
 __pypackages__
 cache
+lightning_logs
