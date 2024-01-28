@@ -461,7 +461,7 @@ class ToyGPTMLM(L.LightningModule):
         hidden_output, _ = self.transformers.forward((self.embedding_dropout(X_wemb), attention_mask))
         logits = self.output_linear.forward(hidden_output)
         # the sequencess of batch are now totally flatten into (B * n, logits), so we have to divide the loss by batch_size
-        masked = target == self.mask_token_id
+        masked = input == self.mask_token_id
         logits = logits[masked]
         target = target[masked]
         return self.loss(logits.view(-1, logits.size(-1)), target.reshape(-1))
