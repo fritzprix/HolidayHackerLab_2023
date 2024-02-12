@@ -125,7 +125,7 @@ def train(args):
                       p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, 
                       **config)
 
-    trainer = L.Trainer(max_epochs=1,  precision=args.precision, max_steps=train_steps, callbacks=[
+    trainer = L.Trainer(max_epochs=1, log_every_n_steps=args.batch, precision=args.precision, max_steps=train_steps, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
         ModelCheckpoint(get_checkpoint_path(model.__class__.__name__), monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
     ], val_check_interval=0.01, logger=logger)
@@ -204,7 +204,7 @@ def resume(args):
     dataset.prepare_data()
     train_steps, _ = dataset.setup()
     print(f'total train steps : {train_steps}')
-    trainer = L.Trainer(max_epochs=1, max_steps=train_steps, precision=args.precision, callbacks=[
+    trainer = L.Trainer(max_epochs=1, max_steps=train_steps, log_every_n_steps=batch_size, precision=args.precision, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
         ModelCheckpoint(get_checkpoint_path(model.__class__.__name__), monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
     ],val_check_interval=0.01, logger=logger)
