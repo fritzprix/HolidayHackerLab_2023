@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any,List
 import json
 import argparse
 import torch
@@ -13,6 +13,8 @@ from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 import wandb
 import os
 
+def get_checkpoint_path(model_name:str):
+    return os.path.join('checkpoints', model_name)
 
 def get_last_file(dir_path: str) -> str:
     files = [os.path.join(dir_path,fname) for fname in os.listdir(dir_path)]
@@ -55,7 +57,6 @@ def get_dtype(precision) -> torch.dtype:
     if precision == '32-true':
         return torch.float
 
-
 def get_steps(model_name: str) -> int:
     # Extract the offset value
     offset_match = re.search(r"offset=(\d+)", model_name)
@@ -72,10 +73,12 @@ def get_steps(model_name: str) -> int:
 
 def train(args):
     device = get_device()
+    print(f'Args => {args}')
     print(f"training will be performed on {device}")
     configs = get_config(args.config)
     config = configs[0]
     torch.set_float32_matmul_precision('medium')
+    
 
     # initialize wandb
 
@@ -98,9 +101,9 @@ def train(args):
     cpu_count = (os.cpu_count() - 1)
 
     dataset = HFCollectionMultiTaskDataModule(tokenizer, 
-                                            paths=['wikimedia/wikipedia', "togethercomputer/RedPajama-Data-1T-Sample"],
+                                            paths=['wikimedia/wikisource', "togethercomputer/RedPajama-Data-1T-Sample"],
                                             subsets=[
-                                                  ['20231101.en'],
+                                                  ['20231201.en'],
                                                   [None]
                                             ],
                                             columns=[
@@ -111,7 +114,9 @@ def train(args):
                                             max_length=config['block_size'], 
                                             num_proc=cpu_count,
                                             batch_size=args.batch, train_size=0.99)
-    
+    dataset.prepare_data()
+    train_steps, _ = dataset.setup()
+    print(f'total train steps : {train_steps}')
     dtype = get_dtype(args.precision)
     
     print(f"tokenizer: {tokenizer} / vocab_size {vocab_size} / pad_id:{tokenizer.pad_token_id}, {tokenizer.pad_token}")
@@ -120,12 +125,14 @@ def train(args):
                       p_dropout=0.1, weight_decay=args.wd, lr=args.lr, batch=args.batch, 
                       **config)
 
-    trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
+    trainer = L.Trainer(max_epochs=1,  precision=args.precision, max_steps=train_steps, callbacks=[
         EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
+        ModelCheckpoint(get_checkpoint_path(model.__class__.__name__), monitor='val_loss', mode='min',filename='model-offset=0-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
     ], val_check_interval=0.01, logger=logger)
 
-    trainer.fit(model, dataset)
+    trainer.fit(model, 
+                train_dataloaders=dataset.train_dataloader(), 
+                val_dataloaders=dataset.val_dataloader())
     if args.wnb:
         wandb.finish(0)
 
@@ -151,12 +158,13 @@ def process(args):
 
 
 def resume(args):
-
+    print(f'Args => {args}')
     tokenizer = get_tokenizer()
     device = get_device()
+    print(f"training will be performed on {device}")
     
     torch.set_float32_matmul_precision('medium')
-    last_ckpt_name = get_last_file(f'checkpoints/{ToyGPT.__name__}')
+    last_ckpt_name = get_last_file(get_checkpoint_path(ToyGPT.__name__))
     step_offset = get_steps(last_ckpt_name)
     model = ToyGPT.load_from_checkpoint(last_ckpt_name, device=device)
     
@@ -171,10 +179,7 @@ def resume(args):
     
     batch_size = model.hparams['batch']
     block_size = model.hparams['block_size']
-    trainer = L.Trainer(max_epochs=1,  precision=args.precision, callbacks=[
-        EarlyStopping(monitor='val_loss', mode='min', patience=10),
-        ModelCheckpoint(f'checkpoints/{model.__class__.__name__}', monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
-    ],val_check_interval=0.01, logger=logger)
+    
     
     
     print(f"resusmed state : {last_ckpt_name}  (steps: {step_offset})")
@@ -195,8 +200,15 @@ def resume(args):
                                             max_length=block_size, 
                                             num_proc=cpu_count,
                                             batch_size=batch_size, train_size=0.99)
-
-    trainer.fit(model, dataset, ckpt_path='last')
+    
+    dataset.prepare_data()
+    train_steps, _ = dataset.setup()
+    print(f'total train steps : {train_steps}')
+    trainer = L.Trainer(max_epochs=1, max_steps=train_steps, precision=args.precision, callbacks=[
+        EarlyStopping(monitor='val_loss', mode='min', patience=10),
+        ModelCheckpoint(get_checkpoint_path(model.__class__.__name__), monitor='val_loss', mode='min',filename=f"model-offset={step_offset}" + '-{step}-{val_loss:.3f}', save_top_k=2, save_last=True)
+    ],val_check_interval=0.01, logger=logger)
+    trainer.fit(model, train_dataloaders=dataset.train_dataloader(), val_dataloaders=dataset.val_dataloader(), ckpt_path='last')
     if args.wnb:
         wandb.finish()
     
@@ -212,7 +224,7 @@ def generate(args):
     device = get_device()
     tokenizer = get_tokenizer()
     if args.model is None:
-        model_checkpoint = get_last_file(f'checkpoints/{ToyGPT.__name__}')
+        model_checkpoint = get_last_file(get_checkpoint_path(ToyGPT.__name__))
     else:
         model_checkpoint = args.model
     model = ToyGPT.load_from_checkpoint(model_checkpoint, device=device)

@@ -338,12 +338,11 @@ class ToyGPT(L.LightningModule):
             
 
             
-        if batch_index % 10 == 0:
-            lr = self.trainer.optimizers[0].param_groups[0]['lr']
-            # log train loss not too much frequently
-            self.log("train_loss", loss)
-            self.log("train_clm_loss", clm_loss)
-            self.log("lr", lr)
+        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        # log train loss not too much frequently
+        self.log("train_loss", loss)
+        self.log("train_clm_loss", clm_loss)
+        self.log("lr", lr)
 
 
         return {"batch_index": batch_index, "loss":loss}
@@ -384,4 +383,3 @@ class ToyGPT(L.LightningModule):
         self.log("test_clm_loss", clm_loss)
         return {"batch_index": batch_index, "val_loss":loss}
     
-

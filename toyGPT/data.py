@@ -1,14 +1,12 @@
-from typing import Any, List, Dict
+from typing import Any, List
 import torch
-import shutil
 import numpy as np
 
 import random
 from torch.nn.utils.rnn import pad_sequence
 
-
 import lightning as L
-from datasets import Dataset, load_from_disk, load_dataset
+from datasets import Dataset, load_dataset
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 from transformers import PreTrainedTokenizer
 from torch.utils import data
@@ -17,7 +15,6 @@ from unstructured.cleaners.core import (
 )
 import re
 from transformers import PreTrainedTokenizer
-import os
 from unstructured.cleaners.core import clean
 
 import random
@@ -204,6 +201,7 @@ class MLMAugmentation:
                         print(input_ids)
                         print(poplulation)
                         continue
+                    assert 0 not in poplulation
                     choices = generate_choices(poplulation, self.masking_fraction)
                     if choices is None:
                         continue
@@ -237,129 +235,6 @@ class CLMAugmentation:
                     input_ids = result["input_ids"]
                     yield {"input": input_ids[0][:-1], "label": input_ids[0][1:]}
                 
-
-class HFCollectionDataModule(L.LightningDataModule):
-
-    def __init__(self, tokenizer: PreTrainedTokenizer, 
-                 paths:List[str],
-                 subsets: List[List[str]],
-                 columns: List[str],
-                 max_length:int,
-                 batch_size:int,
-                 task:str='CLM',
-                 clear_cache:bool=False,
-                 train_size:float=0.9,
-                 num_proc=15) -> None:
-        super().__init__()
-
-        self.name = '_'.join(paths)
-        self.tokenizer = tokenizer
-        self.paths = paths
-        self.subsets = subsets
-        self.columns = columns
-        self.max_length = max_length
-        self.train_size = train_size
-        self.batch_size = batch_size
-        self.num_proc = num_proc
-        self.clear_cache = clear_cache
-        self.dataset = None
-        self.val_dataset = None
-        self.train_dataset = None
-        self.task = task
-        self.local_fdata_cache_path = f'cache/{self.name}_{task}/local_dscache'
-        self.local_tdata_cache_path = f'cache/{self.name}_{task}/train_dscache'
-        self.local_vdata_cache_path = f'cache/{self.name}_{task}/val_dscache'
-        self.local_tokenized_cache_path = f'cache/{self.name}_{task}/tokenized'
-
-
-    def prepare_data(self) -> None:
-        full_dataset = None
-        
-        if self.clear_cache:
-            shutil.rmtree(self.local_fdata_cache_path, ignore_errors=True)
-            shutil.rmtree(self.local_tdata_cache_path, ignore_errors=True)
-            shutil.rmtree(self.local_vdata_cache_path, ignore_errors=True)
-        
-        if not os.path.exists(self.local_fdata_cache_path):
-            
-
-            sentence_chunker = SentenceChunker(self.tokenizer, self.max_length - 2, sep_token=' ' if self.task == 'CLM' else '<sep>')
-            datasets = [load_dataset(path, subset, num_proc=self.num_proc, cache_dir='cache')['train']
-                        .map(lambda b: sentence_chunker(b[column]), batched=True, num_proc=self.num_proc).flatten().select_columns(['success']) for i, (path, column) in enumerate(zip(self.paths, self.columns)) for subset in self.subsets[i]]
-            if self.task == 'CLM':
-                preprocessor = CLMAugmentation(datasets, self.tokenizer, colunm_selection="success")
-            elif self.task == 'MLM':
-                preprocessor = MLMAugmentation(datasets, self.tokenizer, colunm_selection="success", sep_token_id=self.tokenizer.sep_token_id)
-            print(preprocessor)
-            full_dataset = Dataset.from_generator(preprocessor, num_proc=self.num_proc, cache_dir='cache')
-            print(full_dataset)
-            full_dataset = full_dataset.train_test_split(test_size=(1 - self.train_size), train_size=self.train_size)
-            full_dataset.save_to_disk(self.local_fdata_cache_path, num_proc=self.num_proc, num_shards={'train': self.num_proc, 'test': 1})
-        else:
-            print('full data cached locally')
-        
-        if not (os.path.exists(self.local_tdata_cache_path) and os.path.exists(self.local_vdata_cache_path)):
-            if full_dataset is None:
-                full_dataset = load_from_disk(self.local_fdata_cache_path)
-            visible_dataset = full_dataset['train'].shuffle()
-            val_selection, train_selection = random_indices(len(visible_dataset), (1 - self.train_size))
-            val_dataset = visible_dataset.select(val_selection)
-            train_dataset = visible_dataset.select(train_selection)
-            val_dataset.save_to_disk(self.local_vdata_cache_path, num_proc=self.num_proc, num_shards=self.num_proc)
-            train_dataset.save_to_disk(self.local_tdata_cache_path, num_proc=self.num_proc, num_shards=self.num_proc)
-        else:
-            print('load from local cache')
-
-    def setup(self, stage: str) -> None:
-        if self.dataset is None:
-            self.dataset = load_from_disk(self.local_fdata_cache_path)
-        if self.val_dataset is None:
-            self.val_dataset = load_from_disk(self.local_vdata_cache_path)
-        if self.train_dataset is None:
-            self.train_dataset = load_from_disk(self.local_tdata_cache_path)
-
-        return super().setup(stage)
-    
-    
-    def _prepare_for_model(self, data):
-
-        # Pad input sequences
-        inputs_padded = pad_sequence([seq['input'] for seq in data if len(seq['input']) > 0], batch_first=True, padding_value=self.tokenizer.pad_token_id)
-
-        batch_size = inputs_padded.size(0)
-
-        # For CLM, create a triangular attention mask (lower triangular matrix)
-        if self.task == 'CLM':
-            max_len = inputs_padded.size(1)
-            attention_masks = torch.tril(torch.ones((max_len, max_len), dtype=torch.long)).expand((batch_size, max_len, max_len))
-        elif self.task == 'MLM':
-            attention_masks = (inputs_padded != self.tokenizer.pad_token_id).int()
-
-        targets_padded = pad_sequence([tgt['label'].long() for tgt in data], batch_first=True, padding_value=self.tokenizer.pad_token_id)
-
-
-        return {
-            'input': inputs_padded,
-            'target': targets_padded,
-            'attention_mask': attention_masks
-        }
-
-    def _filter(self, data):
-        return len(data['input']) > 0
-
-    def train_dataloader(self) -> TRAIN_DATALOADERS:
-        train_dataset = self.train_dataset
-        train_dataset = train_dataset.select_columns(["input", "label"])
-        return data.DataLoader(train_dataset.with_format(type="torch").filter(self._filter),  batch_size=self.batch_size, collate_fn=self._prepare_for_model)
-    
-    def val_dataloader(self) -> EVAL_DATALOADERS:
-        val_dataset:Dataset = self.val_dataset.select_columns(["input", "label"])
-        return data.DataLoader(val_dataset.with_format(type="torch").filter(self._filter), batch_size=self.batch_size, collate_fn=self._prepare_for_model)
-    
-    def test_dataloader(self) -> EVAL_DATALOADERS:
-        test_dataset = self.dataset["test"].select_columns(["input", "label"])
-        return data.DataLoader(test_dataset.with_format(type="torch").filter(self._filter),  batch_size=self.batch_size, collate_fn=self._prepare_for_model)
-
 
 class MultiTaskBatchBuilder:
     def __init__(self, tokenizer, tasks):
@@ -406,7 +281,7 @@ class ZippedDataset(data.Dataset):
     def __len__(self):
         return np.min([len(dataset) for dataset in self.datasets])
 
-class HFCollectionMultiTaskDataModule(L.LightningDataModule):
+class HFCollectionMultiTaskDataModule:
 
     def __init__(self, tokenizer: PreTrainedTokenizer, 
                  paths:List[str],
@@ -445,41 +320,40 @@ class HFCollectionMultiTaskDataModule(L.LightningDataModule):
 
     def prepare_data(self) -> None:
         for i, path in enumerate(self.paths):
-                for subset in self.subsets[i]:
-                    dataset = load_dataset(path, subset, num_proc=self.num_proc, cache_dir=self.cache_dir)
-                    print(dataset)
+            for subset in self.subsets[i]:
+                dataset = load_dataset(path, subset, num_proc=self.num_proc, cache_dir=self.cache_dir)
+                print(dataset)
 
-    def setup(self, stage: str) -> None:
-        if stage == 'fit':
-            full_datasets = []
-            train_datasets = []
-            val_datasets = []
-            
-            datasets = [load_dataset(path, subset, num_proc=self.num_proc, cache_dir=self.cache_dir)['train'] for i, path in enumerate(self.paths) for subset in self.subsets[i]]
-            for task in self.tasks:
-                print(f'task : {task}')
-                sentence_chunker = SentenceChunker(self.tokenizer, self.max_length - 2, sep_token=' ' if task == 'CLM' else '<sep>')
-                task_specific_datasets = [dataset.map(lambda b: sentence_chunker(b[column]), batched=True, batch_size=100, num_proc=self.num_proc).flatten().select_columns(['success']) for dataset, column in zip(datasets, self.columns)]
-                if task == 'CLM':
-                    preprocessor = CLMAugmentation(task_specific_datasets, self.tokenizer, colunm_selection="success")
-                elif task == 'MLM':
-                    preprocessor = MLMAugmentation(task_specific_datasets, self.tokenizer, colunm_selection="success", sep_token_id=self.tokenizer.sep_token_id)
-                print(f'Augmentation: {preprocessor}')
-                augmented_dataset = Dataset.from_generator(preprocessor, num_proc=self.num_proc, cache_dir=self.cache_dir)
-                augmented_dataset = augmented_dataset.select_columns(["input", "label"]).train_test_split(test_size=(1 - self.train_size), train_size=self.train_size)
-                print(f'dataset: {augmented_dataset}')
-                visible_dataset = augmented_dataset['train']
-                val_selection, train_selection = random_indices(len(visible_dataset), (1 - self.train_size))
-                val_dataset = visible_dataset.select(val_selection)
-                print(f'val dataset : {val_dataset}')
-                train_dataset = visible_dataset.select(train_selection)
-                print(f'train dataset : {train_dataset}')
-                full_datasets.append(augmented_dataset)
-                train_datasets.append(train_dataset)
-                val_datasets.append(val_dataset)
-            self.full_datasets = full_datasets
-            self.train_datasets = train_datasets
-            self.val_datasets = val_datasets
+    def setup(self) -> None:
+        full_datasets = []
+        train_datasets = []
+        val_datasets = []
+        
+        datasets = [load_dataset(path, subset, num_proc=self.num_proc, cache_dir=self.cache_dir)['train'] for i, path in enumerate(self.paths) for subset in self.subsets[i]]
+        for task in self.tasks:
+            print(f'task : {task}')
+            sentence_chunker = SentenceChunker(self.tokenizer, self.max_length - 2, sep_token=' ' if task == 'CLM' else '<sep>')
+            task_specific_datasets = [dataset.map(lambda b: sentence_chunker(b[column]), batched=True, batch_size=100, num_proc=self.num_proc).flatten().select_columns(['success']) for dataset, column in zip(datasets, self.columns)]
+            if task == 'CLM':
+                preprocessor = CLMAugmentation(task_specific_datasets, self.tokenizer, colunm_selection="success")
+            elif task == 'MLM':
+                preprocessor = MLMAugmentation(task_specific_datasets, self.tokenizer, colunm_selection="success", sep_token_id=self.tokenizer.sep_token_id)
+            print(f'Augmentation: {preprocessor}')
+            augmented_dataset = Dataset.from_generator(preprocessor, num_proc=self.num_proc, cache_dir=self.cache_dir)
+            augmented_dataset = augmented_dataset.select_columns(["input", "label"]).train_test_split(test_size=(1 - self.train_size), train_size=self.train_size)
+            print(f'dataset: {augmented_dataset}')
+            visible_dataset = augmented_dataset['train']
+            val_selection, train_selection = random_indices(len(visible_dataset), (1 - self.train_size))
+            val_dataset = visible_dataset.select(val_selection)
+            print(f'val dataset : {val_dataset}')
+            train_dataset = visible_dataset.select(train_selection)
+            print(f'train dataset : {train_dataset}')
+            full_datasets.append(augmented_dataset)
+            train_datasets.append(train_dataset)
+            val_datasets.append(val_dataset)
+        self.full_datasets = full_datasets
+        self.train_datasets = train_datasets
+        self.val_datasets = val_datasets
         
         if self.dataset is None:
             self.dataset = ZippedDataset(self.full_datasets, self.tasks)
@@ -487,7 +361,7 @@ class HFCollectionMultiTaskDataModule(L.LightningDataModule):
             self.val_dataset = ZippedDataset(self.val_datasets, self.tasks)
         if self.train_dataset is None:
             self.train_dataset = ZippedDataset(self.train_datasets, self.tasks)
-        return super().setup(stage)
+        return len(self.train_dataset), len(self.val_dataset)
     
     
     def train_dataloader(self) -> TRAIN_DATALOADERS:
@@ -503,15 +377,3 @@ class HFCollectionMultiTaskDataModule(L.LightningDataModule):
         return data.DataLoader(test_dataset,  batch_size=self.batch_size, collate_fn=self.batch_builder)
 
   
-
-def pad_and_expand_attention_mask(attention_masks, max_len):
-    # Create a new tensor for padded attention masks
-    batch_size = len(attention_masks)
-    padded_masks = torch.zeros(batch_size, max_len, max_len, dtype=torch.long)
-
-    # Copy each attention mask into the padded tensor
-    for i, mask in enumerate(attention_masks):
-        current_len = mask.size(1)
-        padded_masks[i, :current_len, :current_len] = mask
-
-    return padded_masks
