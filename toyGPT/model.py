@@ -56,7 +56,7 @@ class MultiHeadAttentionFA(torch.nn.Module):
 
         sdp_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.p_dropout if self.training else 0)
 
-        return self.out_dropout(self.out_linear(sdp_out.transpose(1,2).view(B, n_seq, C)))
+        return self.out_dropout(self.out_linear(sdp_out.transpose(1,2).reshape(B, n_seq, C)))
 
 class MultiHeadAttention(torch.nn.Module):
 

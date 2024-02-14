@@ -5,7 +5,7 @@ import torch
 import re
 from model import ToyGPT
 from data import HFCollectionMultiTaskDataModule
-from transformers import GPT2TokenizerFast,PreTrainedTokenizer
+from transformers import GPT2TokenizerFast,PreTrainedTokenizer, BertTokenizerFast
 import lightning as L
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
@@ -38,6 +38,8 @@ def get_tokenizer() -> PreTrainedTokenizer:
 
 def get_device() -> Any:
     # will use GPU whenever it's available
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
